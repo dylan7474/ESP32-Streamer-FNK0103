@@ -175,7 +175,7 @@ void connectToWifi() {
     Serial.print("Connected. IP address: ");
     Serial.println(WiFi.localIP());
     wifiConnected = true;
-    wifiStatusMessage = String("Connected (IP: ") + WiFi.localIP().toString() + ")";
+    wifiStatusMessage = WiFi.localIP().toString();
   } else {
     Serial.println("WiFi connection timed out.");
     wifiConnected = false;
