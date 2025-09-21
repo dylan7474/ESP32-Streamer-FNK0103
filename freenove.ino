@@ -628,7 +628,6 @@ void logMp3LoopDiagnostics(const char *context) {
                   streamFile->isOpen() ? "true" : "false",
                   streamFile->getPos(),
                   streamFile->getSize());
-    Serial.printf("[MP3Diag] available=%u\n", streamFile->available());
   } else {
     Serial.println("[MP3Diag] StreamState | streamFile pointer is null");
   }
@@ -667,12 +666,11 @@ void logStreamBufferState(const char *context) {
     return;
   }
 
-  Serial.printf("[StreamBuffer] %s | isOpen=%s | pos=%u | size=%u | available=%u\n",
+  Serial.printf("[StreamBuffer] %s | isOpen=%s | pos=%u | size=%u\n",
                 label,
                 streamFile->isOpen() ? "true" : "false",
                 streamFile->getPos(),
-                streamFile->getSize(),
-                streamFile->available());
+                streamFile->getSize());
 }
 
 void resetStreamSourceStats(const char *context) {
@@ -709,7 +707,6 @@ void logStreamComponents(const char *context) {
                   streamFile->isOpen() ? "true" : "false",
                   streamFile->getPos(),
                   streamFile->getSize());
-    Serial.printf("[StreamComponents] available=%u\n", streamFile->available());
   } else {
     Serial.println("[StreamComponents] streamFile pointer is null");
   }
@@ -804,12 +801,10 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
                 sinceLastCallback);
 
   if (streamFile) {
-    Serial.printf("[StreamSourceStatus] StreamState | isOpen=%s | pos=%u | size=%u\n",
+    Serial.printf("[StreamSourceStatus] StreamState | isOpen=%s | pos=%u | size=%u | WiFiRSSI=%d | channel=%d\n",
                   streamFile->isOpen() ? "true" : "false",
                   streamFile->getPos(),
-                  streamFile->getSize());
-    Serial.printf("[StreamSourceStatus] available=%u | WiFiRSSI=%d | channel=%d\n",
-                  streamFile->available(),
+                  streamFile->getSize(),
                   WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                   WiFi.status() == WL_CONNECTED ? WiFi.channel() : -1);
   } else {
