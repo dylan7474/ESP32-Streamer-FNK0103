@@ -85,6 +85,33 @@ struct StreamSourceStats {
 
 StreamSourceStats streamSourceStats = {};
 
+static const size_t MP3_STATUS_HISTORY_LENGTH = 10;
+static const size_t STREAM_STATUS_HISTORY_LENGTH = 12;
+
+struct Mp3StatusEvent {
+  int code;
+  unsigned long timestampMs;
+  unsigned long runtimeMs;
+  unsigned long sinceLastMs;
+  String message;
+};
+
+struct StreamStatusEvent {
+  int code;
+  unsigned long timestampMs;
+  unsigned long runtimeMs;
+  unsigned long sinceLastMs;
+  String message;
+};
+
+Mp3StatusEvent mp3StatusHistory[MP3_STATUS_HISTORY_LENGTH];
+size_t mp3StatusHistoryCount = 0;
+size_t mp3StatusHistoryNextIndex = 0;
+
+StreamStatusEvent streamStatusHistory[STREAM_STATUS_HISTORY_LENGTH];
+size_t streamStatusHistoryCount = 0;
+size_t streamStatusHistoryNextIndex = 0;
+
 void startStreaming();
 void stopStreaming(const char *reason = nullptr);
 void cleanupStream(const char *context = nullptr);
@@ -92,11 +119,18 @@ void logStreamingState(const char *context);
 void logHeapUsage(const char *context);
 void logWifiDetails(const char *context);
 void logMp3LoopDiagnostics(const char *context);
+void logRecentMp3StatusEvents(const char *context);
 void logStreamSourceSummary(const char *context);
 void logStreamBufferState(const char *context);
 void logStreamComponents(const char *context);
+void logRecentStreamStatusEvents(const char *context);
 void resetStreamSourceStats(const char *context);
+void resetMp3StatusHistory(const char *context);
+void resetStreamStatusHistory(const char *context);
 const char *streamSourceStatusToString(int code);
+const char *mp3ErrorCodeToString(int code);
+void recordMp3StatusEvent(int code, const char *message);
+void recordStreamStatusEvent(int code, const char *message);
 void mp3StatusCallback(void *cbData, int code, const char *string);
 void streamSourceStatusCallback(void *cbData, int code, const char *string);
 void streamMetadataCallback(void *cbData, const char *type, bool isUnicode, const char *str);
@@ -118,6 +152,8 @@ void setup() {
   Serial.println("Audio library logging routed to Serial.");
   logHeapUsage("Boot");
   logWifiDetails("Boot");
+  resetMp3StatusHistory("Boot");
+  resetStreamStatusHistory("Boot");
 
   tft.begin();
   tft.setRotation(0);
@@ -210,6 +246,8 @@ void loop() {
         logStreamBufferState("MP3 loop failure snapshot");
         logStreamComponents("MP3 loop failure snapshot");
         logStreamSourceSummary("MP3 loop failure snapshot");
+        logRecentStreamStatusEvents("MP3 loop failure snapshot");
+        logRecentMp3StatusEvents("MP3 loop failure snapshot");
         logHeapUsage("MP3 loop failure snapshot");
         logWifiDetails("MP3 loop failure snapshot");
         stopStreaming("MP3 loop reported failure");
@@ -221,6 +259,8 @@ void loop() {
       logStreamBufferState("MP3 decoder stopped running before loop");
       logStreamComponents("MP3 decoder stopped running before loop");
       logStreamSourceSummary("MP3 decoder stopped running before loop");
+      logRecentStreamStatusEvents("MP3 decoder stopped running before loop");
+      logRecentMp3StatusEvents("MP3 decoder stopped running before loop");
       stopStreaming("MP3 decoder stopped running");
       drawStreamButton();
       updateStatusText();
@@ -384,6 +424,7 @@ void startStreaming() {
   }
 
   cleanupStream("Pre-start cleanup");
+  resetMp3StatusHistory("Start streaming requested");
 
   streamStatusMessage = "Connecting...";
   updateStatusText();
@@ -486,6 +527,8 @@ void startStreaming() {
 
   streamStatusMessage = "Streaming...";
   Serial.println("MP3 decoder started. Streaming...");
+  recordMp3StatusEvent(MAD_ERROR_NONE, "MP3 decoder started (manual marker)");
+  recordStreamStatusEvent(-1, "Streaming session started (manual marker)");
   Serial.printf("[MP3] Initial stream position=%u | size=%u\n",
                 streamFile ? streamFile->getPos() : 0,
                 streamFile ? streamFile->getSize() : 0);
@@ -503,6 +546,9 @@ void stopStreaming(const char *reason) {
   unsigned long now = millis();
   unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
   unsigned long sinceLastLoopMs = lastMp3LoopMs ? (now - lastMp3LoopMs) : runtimeMs;
+  String stopReasonMessage = String("Stop requested: ") + resolvedReason;
+  recordMp3StatusEvent(MAD_ERROR_NONE, stopReasonMessage.c_str());
+  recordStreamStatusEvent(-2, stopReasonMessage.c_str());
   Serial.printf("[StreamStats] runtimeMs=%lu | sinceLastLoopMs=%lu | loops=%lu | loopFailures=%lu\n",
                 runtimeMs,
                 sinceLastLoopMs,
@@ -512,6 +558,8 @@ void stopStreaming(const char *reason) {
   logStreamSourceSummary("Stop streaming (pre-cleanup)");
   logStreamComponents("Stop streaming (pre-cleanup)");
   logStreamBufferState("Stop streaming (pre-cleanup)");
+  logRecentStreamStatusEvents("Stop streaming (pre-cleanup)");
+  logRecentMp3StatusEvents("Stop streaming (pre-cleanup)");
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
@@ -567,6 +615,31 @@ void cleanupStream(const char *context) {
   mp3LoopIterations = 0;
   mp3LoopFailures = 0;
   resetStreamSourceStats("Cleanup complete");
+  resetMp3StatusHistory("Cleanup complete");
+}
+
+void resetMp3StatusHistory(const char *context) {
+  if (context) {
+    Serial.print("[MP3StatusHistory] Reset requested. Context: ");
+    Serial.println(context);
+  }
+  for (size_t i = 0; i < MP3_STATUS_HISTORY_LENGTH; ++i) {
+    mp3StatusHistory[i] = Mp3StatusEvent();
+  }
+  mp3StatusHistoryCount = 0;
+  mp3StatusHistoryNextIndex = 0;
+}
+
+void resetStreamStatusHistory(const char *context) {
+  if (context) {
+    Serial.print("[StreamStatusHistory] Reset requested. Context: ");
+    Serial.println(context);
+  }
+  for (size_t i = 0; i < STREAM_STATUS_HISTORY_LENGTH; ++i) {
+    streamStatusHistory[i] = StreamStatusEvent();
+  }
+  streamStatusHistoryCount = 0;
+  streamStatusHistoryNextIndex = 0;
 }
 
 void logStreamingState(const char *context) {
@@ -684,6 +757,7 @@ void resetStreamSourceStats(const char *context) {
   streamSourceStats.lastCallbackMs = 0;
   streamSourceStats.lastCodeChangeMs = 0;
   streamSourceStats.lastNoDataMs = 0;
+  resetStreamStatusHistory(context);
 }
 
 void logStreamComponents(const char *context) {
@@ -719,6 +793,56 @@ void logStreamComponents(const char *context) {
                 streamStatusMessage.c_str());
 }
 
+void logRecentMp3StatusEvents(const char *context) {
+  const char *label = context ? context : "(no context)";
+  if (mp3StatusHistoryCount == 0) {
+    Serial.printf("[MP3StatusHistory] %s | no events recorded\n", label);
+    return;
+  }
+
+  Serial.printf("[MP3StatusHistory] %s | count=%u\n",
+                label,
+                static_cast<unsigned int>(mp3StatusHistoryCount));
+
+  for (size_t i = 0; i < mp3StatusHistoryCount; ++i) {
+    size_t index = (mp3StatusHistoryNextIndex + MP3_STATUS_HISTORY_LENGTH - mp3StatusHistoryCount + i) % MP3_STATUS_HISTORY_LENGTH;
+    const Mp3StatusEvent &event = mp3StatusHistory[index];
+    Serial.printf("[MP3StatusHistory] #%u | code=%d (%s) | message=%s | timestampMs=%lu | runtimeMs=%lu | sinceLastMs=%lu\n",
+                  static_cast<unsigned int>(i + 1),
+                  event.code,
+                  mp3ErrorCodeToString(event.code),
+                  event.message.c_str(),
+                  event.timestampMs,
+                  event.runtimeMs,
+                  event.sinceLastMs);
+  }
+}
+
+void logRecentStreamStatusEvents(const char *context) {
+  const char *label = context ? context : "(no context)";
+  if (streamStatusHistoryCount == 0) {
+    Serial.printf("[StreamStatusHistory] %s | no events recorded\n", label);
+    return;
+  }
+
+  Serial.printf("[StreamStatusHistory] %s | count=%u\n",
+                label,
+                static_cast<unsigned int>(streamStatusHistoryCount));
+
+  for (size_t i = 0; i < streamStatusHistoryCount; ++i) {
+    size_t index = (streamStatusHistoryNextIndex + STREAM_STATUS_HISTORY_LENGTH - streamStatusHistoryCount + i) % STREAM_STATUS_HISTORY_LENGTH;
+    const StreamStatusEvent &event = streamStatusHistory[index];
+    Serial.printf("[StreamStatusHistory] #%u | code=%d (%s) | message=%s | timestampMs=%lu | runtimeMs=%lu | sinceLastMs=%lu\n",
+                  static_cast<unsigned int>(i + 1),
+                  event.code,
+                  streamSourceStatusToString(event.code),
+                  event.message.c_str(),
+                  event.timestampMs,
+                  event.runtimeMs,
+                  event.sinceLastMs);
+  }
+}
+
 const char *streamSourceStatusToString(int code) {
   switch (code) {
     case 0:
@@ -740,9 +864,118 @@ const char *streamSourceStatusToString(int code) {
   }
 }
 
+const char *mp3ErrorCodeToString(int code) {
+  switch (code) {
+    case MAD_ERROR_NONE:
+      return "MAD_ERROR_NONE";
+    case MAD_ERROR_BUFLEN:
+      return "MAD_ERROR_BUFLEN";
+    case MAD_ERROR_BUFPTR:
+      return "MAD_ERROR_BUFPTR";
+    case MAD_ERROR_NOMEM:
+      return "MAD_ERROR_NOMEM";
+    case MAD_ERROR_LOSTSYNC:
+      return "MAD_ERROR_LOSTSYNC";
+    case MAD_ERROR_BADLAYER:
+      return "MAD_ERROR_BADLAYER";
+    case MAD_ERROR_BADBITRATE:
+      return "MAD_ERROR_BADBITRATE";
+    case MAD_ERROR_BADSAMPLERATE:
+      return "MAD_ERROR_BADSAMPLERATE";
+    case MAD_ERROR_BADEMPHASIS:
+      return "MAD_ERROR_BADEMPHASIS";
+    case MAD_ERROR_BADCRC:
+      return "MAD_ERROR_BADCRC";
+    case MAD_ERROR_BADBITALLOC:
+      return "MAD_ERROR_BADBITALLOC";
+    case MAD_ERROR_BADSCALEFACTOR:
+      return "MAD_ERROR_BADSCALEFACTOR";
+    case MAD_ERROR_BADMODE:
+      return "MAD_ERROR_BADMODE";
+    case MAD_ERROR_BADFRAMELEN:
+      return "MAD_ERROR_BADFRAMELEN";
+    case MAD_ERROR_BADBIGVALUES:
+      return "MAD_ERROR_BADBIGVALUES";
+    case MAD_ERROR_BADBLOCKTYPE:
+      return "MAD_ERROR_BADBLOCKTYPE";
+    case MAD_ERROR_BADSCFSI:
+      return "MAD_ERROR_BADSCFSI";
+    case MAD_ERROR_BADDATAPTR:
+      return "MAD_ERROR_BADDATAPTR";
+    case MAD_ERROR_BADPART3LEN:
+      return "MAD_ERROR_BADPART3LEN";
+    case MAD_ERROR_BADHUFFTABLE:
+      return "MAD_ERROR_BADHUFFTABLE";
+    case MAD_ERROR_BADHUFFDATA:
+      return "MAD_ERROR_BADHUFFDATA";
+    case MAD_ERROR_BADSTEREO:
+      return "MAD_ERROR_BADSTEREO";
+    case AudioFileSourceHTTPStream::STATUS_HTTPFAIL:
+      return "HTTP_STATUS_FAIL";
+    case AudioFileSourceHTTPStream::STATUS_DISCONNECTED:
+      return "HTTP_STATUS_DISCONNECTED";
+    case AudioFileSourceHTTPStream::STATUS_RECONNECTING:
+      return "HTTP_STATUS_RECONNECTING";
+    case AudioFileSourceHTTPStream::STATUS_RECONNECTED:
+      return "HTTP_STATUS_RECONNECTED";
+    case AudioFileSourceHTTPStream::STATUS_NODATA:
+      return "HTTP_STATUS_NODATA";
+    default:
+      return "Unknown";
+  }
+}
+
+void recordMp3StatusEvent(int code, const char *message) {
+  unsigned long now = millis();
+  unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastMs = 0;
+  if (mp3StatusHistoryCount > 0) {
+    size_t lastIndex = (mp3StatusHistoryNextIndex + MP3_STATUS_HISTORY_LENGTH - 1) % MP3_STATUS_HISTORY_LENGTH;
+    sinceLastMs = now - mp3StatusHistory[lastIndex].timestampMs;
+  }
+
+  Mp3StatusEvent &event = mp3StatusHistory[mp3StatusHistoryNextIndex];
+  event.code = code;
+  event.timestampMs = now;
+  event.runtimeMs = runtimeMs;
+  event.sinceLastMs = sinceLastMs;
+  event.message = message ? String(message) : String("(null)");
+
+  mp3StatusHistoryNextIndex = (mp3StatusHistoryNextIndex + 1) % MP3_STATUS_HISTORY_LENGTH;
+  if (mp3StatusHistoryCount < MP3_STATUS_HISTORY_LENGTH) {
+    mp3StatusHistoryCount++;
+  }
+}
+
+void recordStreamStatusEvent(int code, const char *message) {
+  unsigned long now = millis();
+  unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastMs = 0;
+  if (streamStatusHistoryCount > 0) {
+    size_t lastIndex = (streamStatusHistoryNextIndex + STREAM_STATUS_HISTORY_LENGTH - 1) % STREAM_STATUS_HISTORY_LENGTH;
+    sinceLastMs = now - streamStatusHistory[lastIndex].timestampMs;
+  }
+
+  StreamStatusEvent &event = streamStatusHistory[streamStatusHistoryNextIndex];
+  event.code = code;
+  event.timestampMs = now;
+  event.runtimeMs = runtimeMs;
+  event.sinceLastMs = sinceLastMs;
+  event.message = message ? String(message) : String("(null)");
+
+  streamStatusHistoryNextIndex = (streamStatusHistoryNextIndex + 1) % STREAM_STATUS_HISTORY_LENGTH;
+  if (streamStatusHistoryCount < STREAM_STATUS_HISTORY_LENGTH) {
+    streamStatusHistoryCount++;
+  }
+}
+
 void mp3StatusCallback(void *cbData, int code, const char *string) {
   (void)cbData;
-  Serial.printf("[MP3Status] code=%d | message=%s\n", code, string ? string : "(null)");
+  Serial.printf("[MP3Status] code=%d (%s) | message=%s\n",
+                code,
+                mp3ErrorCodeToString(code),
+                string ? string : "(null)");
+  recordMp3StatusEvent(code, string);
   logStreamComponents("MP3 status callback");
 }
 
@@ -799,6 +1032,7 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
                 static_cast<unsigned long>(streamSourceStats.consecutiveNoData),
                 sinceStreamStart,
                 sinceLastCallback);
+  recordStreamStatusEvent(code, string);
 
   if (streamFile) {
     Serial.printf("[StreamSourceStatus] StreamState | isOpen=%s | pos=%u | size=%u | WiFiRSSI=%d | channel=%d\n",
@@ -820,6 +1054,8 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
     logWifiDetails("Stream source no data");
     logStreamingState("Stream source no data");
     logStreamBufferState("Stream source no data");
+    logRecentStreamStatusEvents("Stream source no data");
+    logRecentMp3StatusEvents("Stream source no data");
     if (streamSourceStats.consecutiveNoData % 3 == 0) {
       logHeapUsage("Stream source repeated no data");
       logStreamSourceSummary("Stream source repeated no data");
@@ -830,6 +1066,8 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
     logStreamingState("Stream source reconnect/ disconnect");
     logStreamSourceSummary("Stream source reconnect/ disconnect");
     logStreamBufferState("Stream source reconnect/ disconnect");
+    logRecentStreamStatusEvents("Stream source reconnect/ disconnect");
+    logRecentMp3StatusEvents("Stream source reconnect/ disconnect");
   }
 
   if (code == 2 || code == 3 || code == 4 || code == 5 || code == 6) {
