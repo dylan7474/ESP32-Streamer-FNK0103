@@ -910,6 +910,11 @@ const char *mp3ErrorCodeToString(int code) {
       return "MAD_ERROR_BADHUFFDATA";
     case MAD_ERROR_BADSTEREO:
       return "MAD_ERROR_BADSTEREO";
+    default:
+      break;
+  }
+
+  switch (code) {
     case AudioFileSourceHTTPStream::STATUS_HTTPFAIL:
       return "HTTP_STATUS_FAIL";
     case AudioFileSourceHTTPStream::STATUS_DISCONNECTED:
