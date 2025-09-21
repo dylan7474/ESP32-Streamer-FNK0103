@@ -77,9 +77,14 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  Serial.println();
+  Serial.println("ESP32 Streamer booting");
+
   tft.begin();
   tft.setRotation(0);
   tft.fillScreen(COLOR_BACKGROUND);
+
+  Serial.println("Display initialized");
 
   int buttonWidth = tft.width() - 60;
   int buttonHeight = 100;
@@ -88,6 +93,7 @@ void setup() {
   streamButton = { buttonX, buttonY, buttonWidth, buttonHeight };
 
   drawLayout();
+  Serial.println("Starting initial WiFi connection attempt");
   connectToWifi();
   updateStatusText();
 }
@@ -99,6 +105,8 @@ void loop() {
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
     updateStatusText();
+    Serial.print("WiFi connection established. IP: ");
+    Serial.println(wifiStatusMessage);
   }
 
   if (WiFi.status() != WL_CONNECTED && wifiConnected) {
@@ -110,9 +118,11 @@ void loop() {
       drawStreamButton();
     }
     updateStatusText();
+    Serial.println("WiFi connection lost. Attempting reconnection when interval elapses.");
   }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
+    Serial.println("WiFi disconnected. Retrying connection.");
     connectToWifi();
   }
 
@@ -124,6 +134,7 @@ void loop() {
         streamingEnabled = false;
         drawStreamButton();
         updateStatusText();
+        Serial.println("MP3 loop reported failure. Streaming stopped.");
       }
     } else {
       streamStatusMessage = "Stream stopped";
@@ -131,6 +142,7 @@ void loop() {
       streamingEnabled = false;
       drawStreamButton();
       updateStatusText();
+      Serial.println("MP3 decoder no longer running. Streaming stopped.");
     }
   }
 
@@ -203,12 +215,18 @@ void connectToWifi() {
   Serial.print("Connecting to WiFi network: ");
   Serial.println(WIFI_SSID);
 
+  if (strlen(WIFI_PASSWORD) == 0) {
+    Serial.println("Warning: WiFi password is empty. Ensure this is expected.");
+  }
+
   wifiConnected = false;
   wifiStatusMessage = String("Connecting to ") + WIFI_SSID + "...";
   updateStatusText();
 
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT_MS) {
+    Serial.print("WiFi status: ");
+    Serial.println(WiFi.status());
     delay(250);
   }
 
@@ -245,6 +263,8 @@ void handleTouch() {
 
   if (insideButton) {
     streamingEnabled = !streamingEnabled;
+    Serial.print("Touch detected inside button. Streaming state now: ");
+    Serial.println(streamingEnabled ? "ENABLED" : "DISABLED");
     if (streamingEnabled) {
       startStreaming();
     } else {
@@ -259,6 +279,7 @@ void startStreaming() {
   if (WiFi.status() != WL_CONNECTED) {
     streamStatusMessage = "WiFi required";
     streamingEnabled = false;
+    Serial.println("Start stream requested but WiFi not connected.");
     return;
   }
 
@@ -267,50 +288,65 @@ void startStreaming() {
   streamStatusMessage = "Connecting...";
   updateStatusText();
 
+  Serial.print("Opening stream URL: ");
+  Serial.println(STREAM_URL);
+
   streamFile = new AudioFileSourceICYStream();
   if (!streamFile || !streamFile->open(STREAM_URL)) {
     streamStatusMessage = "Stream failed";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("Failed to open stream URL.");
     return;
   }
+
+  Serial.println("Stream source opened successfully.");
 
   audioOutput = new AudioOutputI2SNoDAC();
   audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
   audioOutput->SetOutputModeMono(true);
   audioOutput->SetGain(0.8f);
 
+  Serial.println("Configured I2S output pins and gain.");
+
   mp3 = new AudioGeneratorMP3();
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("Failed to start MP3 decoder.");
     return;
   }
 
   streamStatusMessage = "Streaming...";
+  Serial.println("MP3 decoder started. Streaming...");
 }
 
 void stopStreaming() {
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
+      Serial.println("Stopped MP3 decoder.");
     }
   }
   cleanupStream();
   streamStatusMessage = "Streaming stopped";
+  Serial.println("Streaming resources cleaned up.");
 }
 
 void cleanupStream() {
   if (mp3) {
+    Serial.println("Releasing MP3 decoder instance.");
     delete mp3;
     mp3 = nullptr;
   }
   if (audioOutput) {
+    Serial.println("Releasing audio output instance.");
     delete audioOutput;
     audioOutput = nullptr;
   }
   if (streamFile) {
+    Serial.println("Closing stream source instance.");
     streamFile->close();
     delete streamFile;
     streamFile = nullptr;
