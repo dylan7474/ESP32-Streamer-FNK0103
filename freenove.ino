@@ -92,6 +92,7 @@ void logHeapUsage(const char *context);
 void logWifiDetails(const char *context);
 void logMp3LoopDiagnostics(const char *context);
 void logStreamSourceSummary(const char *context);
+void logStreamComponents(const char *context);
 void resetStreamSourceStats(const char *context);
 const char *streamSourceStatusToString(int code);
 void mp3StatusCallback(void *cbData, int code, const char *string);
@@ -141,6 +142,19 @@ void loop() {
     lastStateLog = millis();
   }
 
+  static unsigned long lastComponentLog = 0;
+  unsigned long nowMillis = millis();
+  if (streamingEnabled && mp3 && streamingStartMillis != 0) {
+    unsigned long sinceStart = nowMillis - streamingStartMillis;
+    unsigned long desiredInterval = sinceStart < 5000 ? 1000 : 5000;
+    if (nowMillis - lastComponentLog > desiredInterval) {
+      logStreamComponents("Loop detailed heartbeat");
+      lastComponentLog = nowMillis;
+    }
+  } else {
+    lastComponentLog = nowMillis;
+  }
+
   if (!wifiConnected && WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
@@ -182,17 +196,24 @@ void loop() {
           Serial.printf("[MP3] loop ok #%lu | elapsed=%lums\n",
                         static_cast<unsigned long>(mp3LoopIterations),
                         lastMp3LoopMs - streamingStartMillis);
+          logStreamComponents("MP3 loop success snapshot");
         }
       } else {
         mp3LoopFailures++;
         Serial.printf("[MP3] loop returned false at iteration %lu\n",
                       static_cast<unsigned long>(mp3LoopIterations + 1));
+        logStreamComponents("MP3 loop failure snapshot");
+        logStreamSourceSummary("MP3 loop failure snapshot");
+        logHeapUsage("MP3 loop failure snapshot");
+        logWifiDetails("MP3 loop failure snapshot");
         stopStreaming("MP3 loop reported failure");
         drawStreamButton();
         updateStatusText();
       }
     } else {
       Serial.println("[MP3] Decoder stopped running before loop call.");
+      logStreamComponents("MP3 decoder stopped running before loop");
+      logStreamSourceSummary("MP3 decoder stopped running before loop");
       stopStreaming("MP3 decoder stopped running");
       drawStreamButton();
       updateStatusText();
@@ -400,6 +421,7 @@ void startStreaming() {
                 streamFile->getPos());
   logWifiDetails("After stream open");
   logHeapUsage("After stream source allocation");
+  logStreamComponents("After stream source allocation");
 
   audioOutput = new AudioOutputI2SNoDAC();
   if (!audioOutput) {
@@ -418,6 +440,7 @@ void startStreaming() {
 
   Serial.println("Configured I2S output pins and gain.");
   logHeapUsage("After audio output allocation");
+  logStreamComponents("After audio output allocation");
 
   mp3 = new AudioGeneratorMP3();
   if (!mp3) {
@@ -455,6 +478,7 @@ void startStreaming() {
   logWifiDetails("Streaming started");
   logHeapUsage("After decoder begin");
   logStreamingState("Streaming started");
+  logStreamComponents("Streaming started");
 }
 
 void stopStreaming(const char *reason) {
@@ -471,6 +495,7 @@ void stopStreaming(const char *reason) {
                 static_cast<unsigned long>(mp3LoopFailures));
   logMp3LoopDiagnostics(resolvedReason);
   logStreamSourceSummary("Stop streaming (pre-cleanup)");
+  logStreamComponents("Stop streaming (pre-cleanup)");
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
@@ -517,6 +542,7 @@ void cleanupStream(const char *context) {
   } else {
     Serial.println("Stream source instance already null.");
   }
+  logStreamComponents("After stream resource release");
   logHeapUsage("After cleanup");
   streamingStartMillis = 0;
   lastMp3LoopMs = 0;
@@ -628,6 +654,39 @@ void resetStreamSourceStats(const char *context) {
   streamSourceStats.lastNoDataMs = 0;
 }
 
+void logStreamComponents(const char *context) {
+  const char *label = context ? context : "(no context)";
+  unsigned long now = millis();
+  unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastLoopMs = lastMp3LoopMs ? (now - lastMp3LoopMs) : runtimeMs;
+  Serial.printf("[StreamComponents] %s | runtimeMs=%lu | sinceLastLoopMs=%lu | streamingEnabled=%s | wifiConnectedFlag=%s | WiFiStatus=%d\n",
+                label,
+                runtimeMs,
+                sinceLastLoopMs,
+                streamingEnabled ? "true" : "false",
+                wifiConnected ? "true" : "false",
+                WiFi.status());
+  Serial.printf("[StreamComponents] loopIterations=%lu | loopFailures=%lu\n",
+                static_cast<unsigned long>(mp3LoopIterations),
+                static_cast<unsigned long>(mp3LoopFailures));
+  if (streamFile) {
+    Serial.printf("[StreamComponents] streamFile=%p | isOpen=%s | pos=%u | size=%u\n",
+                  streamFile,
+                  streamFile->isOpen() ? "true" : "false",
+                  streamFile->getPos(),
+                  streamFile->getSize());
+  } else {
+    Serial.println("[StreamComponents] streamFile pointer is null");
+  }
+  Serial.printf("[StreamComponents] mp3=%p | running=%s | audioOutput=%p\n",
+                mp3,
+                (mp3 && mp3->isRunning()) ? "true" : "false",
+                audioOutput);
+  Serial.printf("[StreamComponents] statusMessages | wifi=\"%s\" | stream=\"%s\"\n",
+                wifiStatusMessage.c_str(),
+                streamStatusMessage.c_str());
+}
+
 const char *streamSourceStatusToString(int code) {
   switch (code) {
     case 0:
@@ -652,6 +711,7 @@ const char *streamSourceStatusToString(int code) {
 void mp3StatusCallback(void *cbData, int code, const char *string) {
   (void)cbData;
   Serial.printf("[MP3Status] code=%d | message=%s\n", code, string ? string : "(null)");
+  logStreamComponents("MP3 status callback");
 }
 
 void streamSourceStatusCallback(void *cbData, int code, const char *string) {
@@ -734,6 +794,10 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
     logWifiDetails("Stream source reconnect/ disconnect");
     logStreamingState("Stream source reconnect/ disconnect");
     logStreamSourceSummary("Stream source reconnect/ disconnect");
+  }
+
+  if (code == 2 || code == 3 || code == 4 || code == 5 || code == 6) {
+    logStreamComponents("Stream source status callback");
   }
 
   streamSourceStats.lastCallbackMs = now;
