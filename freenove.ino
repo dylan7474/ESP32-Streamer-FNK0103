@@ -187,11 +187,18 @@ bool probeStreamUrl(const char *url) {
 
   int httpCode = probeHttp.GET();
   unsigned long elapsedMs = millis() - startMs;
+
+  bool isChunked = false;
+  if (probeHttp.hasHeader("Transfer-Encoding")) {
+    String transferEncoding = probeHttp.header("Transfer-Encoding");
+    isChunked = transferEncoding.equalsIgnoreCase("chunked");
+  }
+
   Serial.printf("[StreamProbe] HTTP GET completed | code=%d | elapsedMs=%lu | contentLength=%d | isChunked=%s\n",
                 httpCode,
                 elapsedMs,
                 probeHttp.getSize(),
-                probeHttp.isChunked() ? "true" : "false");
+                isChunked ? "true" : "false");
 
   for (size_t i = 0; i < headerCount; ++i) {
     if (probeHttp.hasHeader(headers[i])) {
