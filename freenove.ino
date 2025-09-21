@@ -6,6 +6,7 @@
 #include <AudioGeneratorMP3.h>
 #include <AudioLogger.h>
 #include <AudioOutputI2SNoDAC.h>
+#include <HTTPClient.h>
 
 #include "config.h"
 
@@ -67,6 +68,9 @@ unsigned long streamingStartMillis = 0;
 unsigned long lastMp3LoopMs = 0;
 uint32_t mp3LoopIterations = 0;
 uint32_t mp3LoopFailures = 0;
+uint32_t lastStreamPosition = 0;
+uint64_t totalStreamBytesRead = 0;
+unsigned long lastStreamReadUpdateMs = 0;
 
 struct StreamSourceStats {
   uint32_t totalCallbacks;
@@ -122,11 +126,14 @@ void logMp3LoopDiagnostics(const char *context);
 void logRecentMp3StatusEvents(const char *context);
 void logStreamSourceSummary(const char *context);
 void logStreamBufferState(const char *context);
+void logStreamReadProgress(const char *context, bool forceLog);
 void logStreamComponents(const char *context);
 void logRecentStreamStatusEvents(const char *context);
 void resetStreamSourceStats(const char *context);
 void resetMp3StatusHistory(const char *context);
 void resetStreamStatusHistory(const char *context);
+void resetStreamReadStats(const char *context);
+bool probeStreamUrl(const char *url);
 const char *streamSourceStatusToString(int code);
 const char *mp3ErrorCodeToString(int code);
 void recordMp3StatusEvent(int code, const char *message);
@@ -141,6 +148,72 @@ void updateStatusText();
 void connectToWifi();
 void handleTouch();
 bool readTouchPoint(int &screenX, int &screenY);
+
+bool probeStreamUrl(const char *url) {
+  if (!url || strlen(url) == 0) {
+    Serial.println("[StreamProbe] Probe skipped because URL is empty.");
+    return false;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[StreamProbe] Probe skipped because WiFi is not connected.");
+    return false;
+  }
+
+  Serial.printf("[StreamProbe] Probing stream URL: %s\n", url);
+  WiFiClient probeClient;
+  HTTPClient probeHttp;
+  const char *headers[] = {
+    "Content-Type",
+    "icy-metaint",
+    "icy-br",
+    "icy-name",
+    "Transfer-Encoding",
+    "Accept-Ranges",
+    "Server"
+  };
+  const size_t headerCount = sizeof(headers) / sizeof(headers[0]);
+
+  probeHttp.setReuse(false);
+#ifdef HTTPC_FORCE_FOLLOW_REDIRECTS
+  probeHttp.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+#endif
+  probeHttp.collectHeaders(headers, headerCount);
+
+  unsigned long startMs = millis();
+  if (!probeHttp.begin(probeClient, url)) {
+    Serial.println("[StreamProbe] Failed to initialize HTTPClient for probe.");
+    return false;
+  }
+
+  int httpCode = probeHttp.GET();
+  unsigned long elapsedMs = millis() - startMs;
+  Serial.printf("[StreamProbe] HTTP GET completed | code=%d | elapsedMs=%lu | contentLength=%d | isChunked=%s\n",
+                httpCode,
+                elapsedMs,
+                probeHttp.getSize(),
+                probeHttp.isChunked() ? "true" : "false");
+
+  for (size_t i = 0; i < headerCount; ++i) {
+    if (probeHttp.hasHeader(headers[i])) {
+      Serial.printf("[StreamProbe] Header %s: %s\n",
+                    headers[i],
+                    probeHttp.header(headers[i]).c_str());
+    }
+  }
+
+  WiFiClient *probeStream = probeHttp.getStreamPtr();
+  if (probeStream) {
+    size_t available = probeStream->available();
+    Serial.printf("[StreamProbe] Initial available payload bytes=%u\n", static_cast<unsigned int>(available));
+  } else {
+    Serial.println("[StreamProbe] Stream pointer unavailable during probe.");
+  }
+
+  probeHttp.end();
+  bool success = httpCode == HTTP_CODE_OK;
+  Serial.printf("[StreamProbe] Probe %s\n", success ? "succeeded" : "failed");
+  return success;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -232,11 +305,14 @@ void loop() {
       if (loopResult) {
         mp3LoopIterations++;
         lastMp3LoopMs = millis();
-        if (mp3LoopIterations <= 3 || mp3LoopIterations % 200 == 0) {
+        bool logThisIteration = (mp3LoopIterations <= 3 || mp3LoopIterations % 200 == 0);
+        logStreamReadProgress("MP3 loop iteration", logThisIteration);
+        if (logThisIteration) {
           Serial.printf("[MP3] loop ok #%lu | elapsed=%lums\n",
                         static_cast<unsigned long>(mp3LoopIterations),
                         lastMp3LoopMs - streamingStartMillis);
           logStreamBufferState("MP3 loop success snapshot");
+          logStreamReadProgress("MP3 loop success snapshot", true);
           logStreamComponents("MP3 loop success snapshot");
         }
       } else {
@@ -244,6 +320,7 @@ void loop() {
         Serial.printf("[MP3] loop returned false at iteration %lu\n",
                       static_cast<unsigned long>(mp3LoopIterations + 1));
         logStreamBufferState("MP3 loop failure snapshot");
+        logStreamReadProgress("MP3 loop failure snapshot", true);
         logStreamComponents("MP3 loop failure snapshot");
         logStreamSourceSummary("MP3 loop failure snapshot");
         logRecentStreamStatusEvents("MP3 loop failure snapshot");
@@ -257,6 +334,7 @@ void loop() {
     } else {
       Serial.println("[MP3] Decoder stopped running before loop call.");
       logStreamBufferState("MP3 decoder stopped running before loop");
+      logStreamReadProgress("MP3 decoder stopped running before loop", true);
       logStreamComponents("MP3 decoder stopped running before loop");
       logStreamSourceSummary("MP3 decoder stopped running before loop");
       logRecentStreamStatusEvents("MP3 decoder stopped running before loop");
@@ -423,6 +501,7 @@ void startStreaming() {
     return;
   }
 
+  resetStreamReadStats("Start streaming request");
   cleanupStream("Pre-start cleanup");
   resetMp3StatusHistory("Start streaming requested");
 
@@ -431,6 +510,8 @@ void startStreaming() {
 
   Serial.print("Opening stream URL: ");
   Serial.println(STREAM_URL);
+  bool probeSuccess = probeStreamUrl(STREAM_URL);
+  Serial.printf("[StreamProbe] Pre-open probe result: %s\n", probeSuccess ? "success" : "failure");
   logHeapUsage("Before stream source allocation");
 
   streamFile = new AudioFileSourceICYStream();
@@ -453,10 +534,12 @@ void startStreaming() {
   logStreamBufferState("After stream source allocation");
 
   resetStreamSourceStats("Start streaming - after source allocation");
+  resetStreamReadStats("Start streaming - before stream open");
 
   if (!streamFile->open(STREAM_URL)) {
     streamStatusMessage = "Stream failed";
     logStreamBufferState("Stream open failure");
+    logStreamReadProgress("Stream open failure", true);
     cleanupStream("Stream open failure");
     streamingEnabled = false;
     Serial.println("Failed to open stream URL.");
@@ -470,6 +553,8 @@ void startStreaming() {
                 streamFile->isOpen() ? "true" : "false",
                 streamFile->getSize(),
                 streamFile->getPos());
+  resetStreamReadStats("After stream open");
+  logStreamReadProgress("After stream open", true);
   logStreamBufferState("After stream open");
   logWifiDetails("After stream open");
   logHeapUsage("After stream source allocation");
@@ -512,6 +597,7 @@ void startStreaming() {
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
     logStreamBufferState("Decoder begin failure");
+    logStreamReadProgress("Decoder begin failure", true);
     cleanupStream("Decoder begin failure");
     streamingEnabled = false;
     Serial.println("Failed to start MP3 decoder.");
@@ -532,6 +618,7 @@ void startStreaming() {
   Serial.printf("[MP3] Initial stream position=%u | size=%u\n",
                 streamFile ? streamFile->getPos() : 0,
                 streamFile ? streamFile->getSize() : 0);
+  logStreamReadProgress("Streaming started", true);
   logStreamBufferState("Streaming started");
   logWifiDetails("Streaming started");
   logHeapUsage("After decoder begin");
@@ -554,6 +641,7 @@ void stopStreaming(const char *reason) {
                 sinceLastLoopMs,
                 static_cast<unsigned long>(mp3LoopIterations),
                 static_cast<unsigned long>(mp3LoopFailures));
+  logStreamReadProgress("Stop streaming", true);
   logMp3LoopDiagnostics(resolvedReason);
   logStreamSourceSummary("Stop streaming (pre-cleanup)");
   logStreamComponents("Stop streaming (pre-cleanup)");
@@ -582,6 +670,7 @@ void cleanupStream(const char *context) {
   }
   logStreamSourceSummary("Cleanup start");
   logStreamBufferState("Cleanup start");
+  logStreamReadProgress("Cleanup start", true);
   if (mp3) {
     Serial.println("Releasing MP3 decoder instance.");
     delete mp3;
@@ -616,6 +705,7 @@ void cleanupStream(const char *context) {
   mp3LoopFailures = 0;
   resetStreamSourceStats("Cleanup complete");
   resetMp3StatusHistory("Cleanup complete");
+  resetStreamReadStats("Cleanup complete");
 }
 
 void resetMp3StatusHistory(const char *context) {
@@ -640,6 +730,16 @@ void resetStreamStatusHistory(const char *context) {
   }
   streamStatusHistoryCount = 0;
   streamStatusHistoryNextIndex = 0;
+}
+
+void resetStreamReadStats(const char *context) {
+  if (context) {
+    Serial.print("[StreamRead] Reset requested. Context: ");
+    Serial.println(context);
+  }
+  lastStreamPosition = streamFile ? streamFile->getPos() : 0;
+  totalStreamBytesRead = 0;
+  lastStreamReadUpdateMs = millis();
 }
 
 void logStreamingState(const char *context) {
@@ -746,6 +846,50 @@ void logStreamBufferState(const char *context) {
                 streamFile->getSize());
 }
 
+void logStreamReadProgress(const char *context, bool forceLog) {
+  const char *label = context ? context : "(no context)";
+  unsigned long now = millis();
+  if (!streamFile) {
+    if (forceLog) {
+      Serial.printf("[StreamRead] %s | streamFile pointer is null\n", label);
+    }
+    lastStreamPosition = 0;
+    lastStreamReadUpdateMs = now;
+    return;
+  }
+
+  uint32_t currentPos = streamFile->getPos();
+  bool positionWrapped = currentPos < lastStreamPosition;
+  uint32_t delta = 0;
+  if (positionWrapped) {
+    delta = currentPos;
+  } else {
+    delta = currentPos - lastStreamPosition;
+  }
+
+  totalStreamBytesRead += delta;
+  unsigned long sinceLastMs = lastStreamReadUpdateMs ? (now - lastStreamReadUpdateMs) : 0;
+  bool shouldLog = forceLog || positionWrapped;
+  if (shouldLog) {
+    if (positionWrapped) {
+      Serial.printf("[StreamRead] %s | stream position wrapped or reset (previous=%u, current=%u)\n",
+                    label,
+                    lastStreamPosition,
+                    currentPos);
+    }
+    Serial.printf("[StreamRead] %s | pos=%u | delta=%u | total=%llu | sinceLastMs=%lu | isOpen=%s\n",
+                  label,
+                  currentPos,
+                  delta,
+                  static_cast<unsigned long long>(totalStreamBytesRead),
+                  sinceLastMs,
+                  streamFile->isOpen() ? "true" : "false");
+  }
+
+  lastStreamPosition = currentPos;
+  lastStreamReadUpdateMs = now;
+}
+
 void resetStreamSourceStats(const char *context) {
   if (context) {
     Serial.print("[StreamSourceStats] Reset requested. Context: ");
@@ -758,6 +902,7 @@ void resetStreamSourceStats(const char *context) {
   streamSourceStats.lastCodeChangeMs = 0;
   streamSourceStats.lastNoDataMs = 0;
   resetStreamStatusHistory(context);
+  resetStreamReadStats(context);
 }
 
 void logStreamComponents(const char *context) {
@@ -784,6 +929,11 @@ void logStreamComponents(const char *context) {
   } else {
     Serial.println("[StreamComponents] streamFile pointer is null");
   }
+  unsigned long sinceLastReadMs = lastStreamReadUpdateMs ? (now - lastStreamReadUpdateMs) : 0;
+  Serial.printf("[StreamComponents] streamBytesReadTotal=%llu | lastStreamPos=%u | sinceLastReadMs=%lu\n",
+                static_cast<unsigned long long>(totalStreamBytesRead),
+                lastStreamPosition,
+                sinceLastReadMs);
   Serial.printf("[StreamComponents] mp3=%p | running=%s | audioOutput=%p\n",
                 mp3,
                 (mp3 && mp3->isRunning()) ? "true" : "false",
@@ -1038,6 +1188,7 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
                 sinceStreamStart,
                 sinceLastCallback);
   recordStreamStatusEvent(code, string);
+  logStreamReadProgress("Stream source status callback", true);
 
   if (streamFile) {
     Serial.printf("[StreamSourceStatus] StreamState | isOpen=%s | pos=%u | size=%u | WiFiRSSI=%d | channel=%d\n",
