@@ -63,8 +63,10 @@ AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2SNoDAC *audioOutput = nullptr;
 
 void startStreaming();
-void stopStreaming();
-void cleanupStream();
+void stopStreaming(const char *reason = nullptr);
+void cleanupStream(const char *context = nullptr);
+void logStreamingState(const char *context);
+void logHeapUsage(const char *context);
 
 void drawLayout();
 void drawStreamButton();
@@ -79,6 +81,7 @@ void setup() {
 
   Serial.println();
   Serial.println("ESP32 Streamer booting");
+  logHeapUsage("Boot");
 
   tft.begin();
   tft.setRotation(0);
@@ -101,19 +104,28 @@ void setup() {
 void loop() {
   handleTouch();
 
+  static unsigned long lastStateLog = 0;
+  if (millis() - lastStateLog > 5000) {
+    logStreamingState("Loop heartbeat");
+    lastStateLog = millis();
+  }
+
   if (!wifiConnected && WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
     updateStatusText();
     Serial.print("WiFi connection established. IP: ");
     Serial.println(wifiStatusMessage);
+    Serial.print("WiFi RSSI: ");
+    Serial.println(WiFi.RSSI());
+    logHeapUsage("WiFi connected");
   }
 
   if (WiFi.status() != WL_CONNECTED && wifiConnected) {
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection lost";
     if (streamingEnabled) {
-      stopStreaming();
+      stopStreaming("WiFi connection lost");
       streamingEnabled = false;
       drawStreamButton();
     }
@@ -130,19 +142,17 @@ void loop() {
     if (mp3->isRunning()) {
       if (!mp3->loop()) {
         streamStatusMessage = "Stream stopped";
-        stopStreaming();
+        stopStreaming("MP3 loop reported failure");
         streamingEnabled = false;
         drawStreamButton();
         updateStatusText();
-        Serial.println("MP3 loop reported failure. Streaming stopped.");
       }
     } else {
       streamStatusMessage = "Stream stopped";
-      stopStreaming();
+      stopStreaming("MP3 decoder stopped running");
       streamingEnabled = false;
       drawStreamButton();
       updateStatusText();
-      Serial.println("MP3 decoder no longer running. Streaming stopped.");
     }
   }
 
@@ -211,6 +221,7 @@ void connectToWifi() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  logStreamingState("Initiated WiFi begin");
 
   Serial.print("Connecting to WiFi network: ");
   Serial.println(WIFI_SSID);
@@ -233,6 +244,8 @@ void connectToWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("Connected. IP address: ");
     Serial.println(WiFi.localIP());
+    Serial.print("WiFi RSSI: ");
+    Serial.println(WiFi.RSSI());
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
   } else {
@@ -265,10 +278,11 @@ void handleTouch() {
     streamingEnabled = !streamingEnabled;
     Serial.print("Touch detected inside button. Streaming state now: ");
     Serial.println(streamingEnabled ? "ENABLED" : "DISABLED");
+    logStreamingState(streamingEnabled ? "Touch start request" : "Touch stop request");
     if (streamingEnabled) {
       startStreaming();
     } else {
-      stopStreaming();
+      stopStreaming("User requested stop");
     }
     drawStreamButton();
     updateStatusText();
@@ -280,27 +294,31 @@ void startStreaming() {
     streamStatusMessage = "WiFi required";
     streamingEnabled = false;
     Serial.println("Start stream requested but WiFi not connected.");
+    logStreamingState("Start denied - WiFi missing");
     return;
   }
 
-  cleanupStream();
+  cleanupStream("Pre-start cleanup");
 
   streamStatusMessage = "Connecting...";
   updateStatusText();
 
   Serial.print("Opening stream URL: ");
   Serial.println(STREAM_URL);
+  logHeapUsage("Before stream source allocation");
 
   streamFile = new AudioFileSourceICYStream();
   if (!streamFile || !streamFile->open(STREAM_URL)) {
     streamStatusMessage = "Stream failed";
-    cleanupStream();
+    cleanupStream("Stream open failure");
     streamingEnabled = false;
     Serial.println("Failed to open stream URL.");
+    logStreamingState("Stream open failure");
     return;
   }
 
   Serial.println("Stream source opened successfully.");
+  logHeapUsage("After stream source allocation");
 
   audioOutput = new AudioOutputI2SNoDAC();
   audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
@@ -308,49 +326,89 @@ void startStreaming() {
   audioOutput->SetGain(0.8f);
 
   Serial.println("Configured I2S output pins and gain.");
+  logHeapUsage("After audio output allocation");
 
   mp3 = new AudioGeneratorMP3();
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
-    cleanupStream();
+    cleanupStream("Decoder begin failure");
     streamingEnabled = false;
     Serial.println("Failed to start MP3 decoder.");
+    logStreamingState("Decoder begin failure");
     return;
   }
 
   streamStatusMessage = "Streaming...";
   Serial.println("MP3 decoder started. Streaming...");
+  logStreamingState("Streaming started");
 }
 
-void stopStreaming() {
+void stopStreaming(const char *reason) {
+  const char *resolvedReason = reason ? reason : "No reason supplied";
+  Serial.print("Stopping streaming. Reason: ");
+  Serial.println(resolvedReason);
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
       Serial.println("Stopped MP3 decoder.");
     }
   }
-  cleanupStream();
-  streamStatusMessage = "Streaming stopped";
-  Serial.println("Streaming resources cleaned up.");
+  cleanupStream("Stop streaming");
+  streamStatusMessage = String("Stopped: ") + resolvedReason;
+  Serial.print("Streaming resources cleaned up. Last reason: ");
+  Serial.println(resolvedReason);
+  logStreamingState("Streaming stopped");
 }
 
-void cleanupStream() {
+void cleanupStream(const char *context) {
+  if (context) {
+    Serial.print("Cleaning up stream resources. Context: ");
+    Serial.println(context);
+  }
   if (mp3) {
     Serial.println("Releasing MP3 decoder instance.");
     delete mp3;
     mp3 = nullptr;
+  } else {
+    Serial.println("MP3 decoder instance already null.");
   }
   if (audioOutput) {
     Serial.println("Releasing audio output instance.");
     delete audioOutput;
     audioOutput = nullptr;
+  } else {
+    Serial.println("Audio output instance already null.");
   }
   if (streamFile) {
     Serial.println("Closing stream source instance.");
     streamFile->close();
     delete streamFile;
     streamFile = nullptr;
+  } else {
+    Serial.println("Stream source instance already null.");
   }
+  logHeapUsage("After cleanup");
+}
+
+void logStreamingState(const char *context) {
+  const char *label = context ? context : "(no context)";
+  Serial.printf("[StreamState] %s | WiFiStatus=%d | wifiConnected=%s | streamingEnabled=%s | mp3=%p | streamFile=%p | audioOutput=%p\n",
+                label,
+                WiFi.status(),
+                wifiConnected ? "true" : "false",
+                streamingEnabled ? "true" : "false",
+                mp3,
+                streamFile,
+                audioOutput);
+}
+
+void logHeapUsage(const char *context) {
+  const char *label = context ? context : "(no context)";
+  Serial.printf("[Heap] %s | free=%u | minFree=%u | maxAlloc=%u\n",
+                label,
+                ESP.getFreeHeap(),
+                ESP.getMinFreeHeap(),
+                ESP.getMaxAllocHeap());
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {
