@@ -51,6 +51,8 @@ Button streamButton;
 bool streamingEnabled = false;
 unsigned long lastTouchTime = 0;
 unsigned long lastWifiAttempt = 0;
+bool wifiConnected = false;
+String wifiStatusMessage = "Not connected";
 
 void drawLayout();
 void drawStreamButton();
@@ -80,6 +82,12 @@ void setup() {
 
 void loop() {
   handleTouch();
+
+  if (WiFi.status() != WL_CONNECTED && wifiConnected) {
+    wifiConnected = false;
+    wifiStatusMessage = "WiFi connection lost";
+    updateStatusText();
+  }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
     connectToWifi();
@@ -130,13 +138,7 @@ void updateStatusText() {
 
   tft.fillRect(statusAreaX, statusAreaY - 4, statusWidth, statusHeight, COLOR_BACKGROUND);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    IPAddress ip = WiFi.localIP();
-    String wifiStatus = String("Connected (IP: ") + ip.toString() + ")";
-    tft.drawString(wifiStatus, statusAreaX, statusAreaY);
-  } else {
-    tft.drawString("Not connected", statusAreaX, statusAreaY);
-  }
+  tft.drawString(wifiStatusMessage, statusAreaX, statusAreaY);
 
   tft.drawString(streamingEnabled ? "Streaming enabled" : "Streaming stopped",
                  statusAreaX,
@@ -148,6 +150,8 @@ void connectToWifi() {
 
   if (strlen(WIFI_SSID) == 0) {
     Serial.println("WiFi credentials not set. Skipping connection attempt.");
+    wifiConnected = false;
+    wifiStatusMessage = "WiFi credentials not set";
     updateStatusText();
     return;
   }
@@ -158,6 +162,10 @@ void connectToWifi() {
   Serial.print("Connecting to WiFi network: ");
   Serial.println(WIFI_SSID);
 
+  wifiConnected = false;
+  wifiStatusMessage = String("Connecting to ") + WIFI_SSID + "...";
+  updateStatusText();
+
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
@@ -166,8 +174,12 @@ void connectToWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("Connected. IP address: ");
     Serial.println(WiFi.localIP());
+    wifiConnected = true;
+    wifiStatusMessage = String("Connected (IP: ") + WiFi.localIP().toString() + ")";
   } else {
     Serial.println("WiFi connection timed out.");
+    wifiConnected = false;
+    wifiStatusMessage = "WiFi connection timed out";
   }
 
   updateStatusText();
