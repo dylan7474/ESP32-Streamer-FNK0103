@@ -62,11 +62,21 @@ AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2SNoDAC *audioOutput = nullptr;
 
+unsigned long streamingStartMillis = 0;
+unsigned long lastMp3LoopMs = 0;
+uint32_t mp3LoopIterations = 0;
+uint32_t mp3LoopFailures = 0;
+
 void startStreaming();
 void stopStreaming(const char *reason = nullptr);
 void cleanupStream(const char *context = nullptr);
 void logStreamingState(const char *context);
 void logHeapUsage(const char *context);
+void logWifiDetails(const char *context);
+void logMp3LoopDiagnostics(const char *context);
+void mp3StatusCallback(void *cbData, int code, const char *string);
+void streamSourceStatusCallback(void *cbData, int code, const char *string);
+void streamMetadataCallback(void *cbData, const char *type, bool isUnicode, const char *str);
 
 void drawLayout();
 void drawStreamButton();
@@ -82,6 +92,7 @@ void setup() {
   Serial.println();
   Serial.println("ESP32 Streamer booting");
   logHeapUsage("Boot");
+  logWifiDetails("Boot");
 
   tft.begin();
   tft.setRotation(0);
@@ -118,6 +129,8 @@ void loop() {
     Serial.println(wifiStatusMessage);
     Serial.print("WiFi RSSI: ");
     Serial.println(WiFi.RSSI());
+    Serial.printf("WiFi channel: %d\n", WiFi.channel());
+    logWifiDetails("WiFi connected event");
     logHeapUsage("WiFi connected");
   }
 
@@ -126,31 +139,41 @@ void loop() {
     wifiStatusMessage = "WiFi connection lost";
     if (streamingEnabled) {
       stopStreaming("WiFi connection lost");
-      streamingEnabled = false;
       drawStreamButton();
     }
     updateStatusText();
     Serial.println("WiFi connection lost. Attempting reconnection when interval elapses.");
+    logWifiDetails("WiFi lost event");
   }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
     Serial.println("WiFi disconnected. Retrying connection.");
+    logWifiDetails("WiFi retry trigger");
     connectToWifi();
   }
 
   if (streamingEnabled && mp3) {
     if (mp3->isRunning()) {
-      if (!mp3->loop()) {
-        streamStatusMessage = "Stream stopped";
+      bool loopResult = mp3->loop();
+      if (loopResult) {
+        mp3LoopIterations++;
+        lastMp3LoopMs = millis();
+        if (mp3LoopIterations <= 3 || mp3LoopIterations % 200 == 0) {
+          Serial.printf("[MP3] loop ok #%lu | elapsed=%lums\n",
+                        static_cast<unsigned long>(mp3LoopIterations),
+                        lastMp3LoopMs - streamingStartMillis);
+        }
+      } else {
+        mp3LoopFailures++;
+        Serial.printf("[MP3] loop returned false at iteration %lu\n",
+                      static_cast<unsigned long>(mp3LoopIterations + 1));
         stopStreaming("MP3 loop reported failure");
-        streamingEnabled = false;
         drawStreamButton();
         updateStatusText();
       }
     } else {
-      streamStatusMessage = "Stream stopped";
+      Serial.println("[MP3] Decoder stopped running before loop call.");
       stopStreaming("MP3 decoder stopped running");
-      streamingEnabled = false;
       drawStreamButton();
       updateStatusText();
     }
@@ -210,6 +233,7 @@ void updateStatusText() {
 
 void connectToWifi() {
   lastWifiAttempt = millis();
+  Serial.printf("[WiFi] Starting connection attempt at %lums since boot\n", lastWifiAttempt);
 
   if (strlen(WIFI_SSID) == 0) {
     Serial.println("WiFi credentials not set. Skipping connection attempt.");
@@ -220,6 +244,7 @@ void connectToWifi() {
   }
 
   WiFi.mode(WIFI_STA);
+  logWifiDetails("Before WiFi begin");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   logStreamingState("Initiated WiFi begin");
 
@@ -238,6 +263,7 @@ void connectToWifi() {
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT_MS) {
     Serial.print("WiFi status: ");
     Serial.println(WiFi.status());
+    logWifiDetails("WiFi connect wait loop");
     delay(250);
   }
 
@@ -246,10 +272,13 @@ void connectToWifi() {
     Serial.println(WiFi.localIP());
     Serial.print("WiFi RSSI: ");
     Serial.println(WiFi.RSSI());
+    Serial.printf("WiFi channel: %d\n", WiFi.channel());
+    logWifiDetails("WiFi begin success");
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
   } else {
     Serial.println("WiFi connection timed out.");
+    logWifiDetails("WiFi begin timeout");
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection timed out";
   }
@@ -276,7 +305,14 @@ void handleTouch() {
 
   if (insideButton) {
     streamingEnabled = !streamingEnabled;
-    Serial.print("Touch detected inside button. Streaming state now: ");
+    Serial.printf("Touch detected inside button at (%d, %d). Bounds x=%d..%d y=%d..%d\n",
+                  touchX,
+                  touchY,
+                  streamButton.x,
+                  streamButton.x + streamButton.w,
+                  streamButton.y,
+                  streamButton.y + streamButton.h);
+    Serial.print("Touch toggled streaming state to: ");
     Serial.println(streamingEnabled ? "ENABLED" : "DISABLED");
     logStreamingState(streamingEnabled ? "Touch start request" : "Touch stop request");
     if (streamingEnabled) {
@@ -295,6 +331,7 @@ void startStreaming() {
     streamingEnabled = false;
     Serial.println("Start stream requested but WiFi not connected.");
     logStreamingState("Start denied - WiFi missing");
+    logWifiDetails("Start denied - WiFi missing");
     return;
   }
 
@@ -308,19 +345,51 @@ void startStreaming() {
   logHeapUsage("Before stream source allocation");
 
   streamFile = new AudioFileSourceICYStream();
-  if (!streamFile || !streamFile->open(STREAM_URL)) {
+  if (!streamFile) {
+    streamStatusMessage = "Stream failed";
+    cleanupStream("Stream allocation failure");
+    streamingEnabled = false;
+    Serial.println("Failed to allocate stream source instance.");
+    logStreamingState("Stream allocation failure");
+    logWifiDetails("Stream allocation failure");
+    return;
+  }
+
+  streamFile->RegisterStatusCB(streamSourceStatusCallback, nullptr);
+  streamFile->RegisterMetadataCB(streamMetadataCallback, nullptr);
+  streamFile->SetReconnect(5, 2000);
+  streamFile->useHTTP10();
+  Serial.println("Configured stream source callbacks, reconnect policy, and HTTP/1.0 mode.");
+
+  if (!streamFile->open(STREAM_URL)) {
     streamStatusMessage = "Stream failed";
     cleanupStream("Stream open failure");
     streamingEnabled = false;
     Serial.println("Failed to open stream URL.");
     logStreamingState("Stream open failure");
+    logWifiDetails("Stream open failure");
     return;
   }
 
   Serial.println("Stream source opened successfully.");
+  Serial.printf("[Stream] isOpen=%s | size=%u | pos=%u\n",
+                streamFile->isOpen() ? "true" : "false",
+                streamFile->getSize(),
+                streamFile->getPos());
+  logWifiDetails("After stream open");
   logHeapUsage("After stream source allocation");
 
   audioOutput = new AudioOutputI2SNoDAC();
+  if (!audioOutput) {
+    streamStatusMessage = "Audio alloc fail";
+    cleanupStream("Audio output allocation failure");
+    streamingEnabled = false;
+    Serial.println("Failed to allocate audio output instance.");
+    logStreamingState("Audio output allocation failure");
+    logWifiDetails("Audio output allocation failure");
+    return;
+  }
+
   audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
   audioOutput->SetOutputModeMono(true);
   audioOutput->SetGain(0.8f);
@@ -329,17 +398,40 @@ void startStreaming() {
   logHeapUsage("After audio output allocation");
 
   mp3 = new AudioGeneratorMP3();
+  if (!mp3) {
+    streamStatusMessage = "Decoder alloc fail";
+    cleanupStream("Decoder allocation failure");
+    streamingEnabled = false;
+    Serial.println("Failed to allocate MP3 decoder instance.");
+    logStreamingState("Decoder allocation failure");
+    logWifiDetails("Decoder allocation failure");
+    return;
+  }
+
+  mp3->RegisterStatusCB(mp3StatusCallback, nullptr);
+
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
     cleanupStream("Decoder begin failure");
     streamingEnabled = false;
     Serial.println("Failed to start MP3 decoder.");
     logStreamingState("Decoder begin failure");
+    logWifiDetails("Decoder begin failure");
     return;
   }
 
+  streamingStartMillis = millis();
+  lastMp3LoopMs = streamingStartMillis;
+  mp3LoopIterations = 0;
+  mp3LoopFailures = 0;
+
   streamStatusMessage = "Streaming...";
   Serial.println("MP3 decoder started. Streaming...");
+  Serial.printf("[MP3] Initial stream position=%u | size=%u\n",
+                streamFile ? streamFile->getPos() : 0,
+                streamFile ? streamFile->getSize() : 0);
+  logWifiDetails("Streaming started");
+  logHeapUsage("After decoder begin");
   logStreamingState("Streaming started");
 }
 
@@ -347,16 +439,27 @@ void stopStreaming(const char *reason) {
   const char *resolvedReason = reason ? reason : "No reason supplied";
   Serial.print("Stopping streaming. Reason: ");
   Serial.println(resolvedReason);
+  unsigned long now = millis();
+  unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastLoopMs = lastMp3LoopMs ? (now - lastMp3LoopMs) : runtimeMs;
+  Serial.printf("[StreamStats] runtimeMs=%lu | sinceLastLoopMs=%lu | loops=%lu | loopFailures=%lu\n",
+                runtimeMs,
+                sinceLastLoopMs,
+                static_cast<unsigned long>(mp3LoopIterations),
+                static_cast<unsigned long>(mp3LoopFailures));
+  logMp3LoopDiagnostics(resolvedReason);
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
       Serial.println("Stopped MP3 decoder.");
     }
   }
+  streamingEnabled = false;
   cleanupStream("Stop streaming");
   streamStatusMessage = String("Stopped: ") + resolvedReason;
   Serial.print("Streaming resources cleaned up. Last reason: ");
   Serial.println(resolvedReason);
+  logWifiDetails("After stop streaming");
   logStreamingState("Streaming stopped");
 }
 
@@ -380,7 +483,10 @@ void cleanupStream(const char *context) {
     Serial.println("Audio output instance already null.");
   }
   if (streamFile) {
-    Serial.println("Closing stream source instance.");
+    Serial.printf("Closing stream source instance. isOpen=%s | pos=%u | size=%u\n",
+                  streamFile->isOpen() ? "true" : "false",
+                  streamFile->getPos(),
+                  streamFile->getSize());
     streamFile->close();
     delete streamFile;
     streamFile = nullptr;
@@ -388,6 +494,10 @@ void cleanupStream(const char *context) {
     Serial.println("Stream source instance already null.");
   }
   logHeapUsage("After cleanup");
+  streamingStartMillis = 0;
+  lastMp3LoopMs = 0;
+  mp3LoopIterations = 0;
+  mp3LoopFailures = 0;
 }
 
 void logStreamingState(const char *context) {
@@ -409,6 +519,70 @@ void logHeapUsage(const char *context) {
                 ESP.getFreeHeap(),
                 ESP.getMinFreeHeap(),
                 ESP.getMaxAllocHeap());
+}
+
+void logWifiDetails(const char *context) {
+  const char *label = context ? context : "(no context)";
+  wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
+    Serial.printf("[WiFi] %s | status=%d | SSID=%s | IP=%s | RSSI=%d | channel=%d\n",
+                  label,
+                  status,
+                  WiFi.SSID().c_str(),
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.RSSI(),
+                  WiFi.channel());
+  } else {
+    Serial.printf("[WiFi] %s | status=%d | wifiConnectedFlag=%s\n",
+                  label,
+                  status,
+                  wifiConnected ? "true" : "false");
+  }
+}
+
+void logMp3LoopDiagnostics(const char *context) {
+  const char *label = context ? context : "(no context)";
+  unsigned long now = millis();
+  unsigned long runtimeMs = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastLoopMs = lastMp3LoopMs ? (now - lastMp3LoopMs) : runtimeMs;
+  Serial.printf("[MP3Diag] %s | streamingEnabled=%s | mp3=%p | running=%s | loops=%lu | loopFailures=%lu | runtimeMs=%lu | sinceLastLoopMs=%lu\n",
+                label,
+                streamingEnabled ? "true" : "false",
+                mp3,
+                (mp3 && mp3->isRunning()) ? "true" : "false",
+                static_cast<unsigned long>(mp3LoopIterations),
+                static_cast<unsigned long>(mp3LoopFailures),
+                runtimeMs,
+                sinceLastLoopMs);
+  if (streamFile) {
+    Serial.printf("[MP3Diag] StreamState | isOpen=%s | pos=%u | size=%u\n",
+                  streamFile->isOpen() ? "true" : "false",
+                  streamFile->getPos(),
+                  streamFile->getSize());
+  } else {
+    Serial.println("[MP3Diag] StreamState | streamFile pointer is null");
+  }
+  Serial.printf("[MP3Diag] AudioOutput pointer=%p\n", audioOutput);
+  logWifiDetails("MP3 diagnostics");
+  logHeapUsage("MP3 diagnostics");
+}
+
+void mp3StatusCallback(void *cbData, int code, const char *string) {
+  (void)cbData;
+  Serial.printf("[MP3Status] code=%d | message=%s\n", code, string ? string : "(null)");
+}
+
+void streamSourceStatusCallback(void *cbData, int code, const char *string) {
+  (void)cbData;
+  Serial.printf("[StreamSourceStatus] code=%d | message=%s\n", code, string ? string : "(null)");
+}
+
+void streamMetadataCallback(void *cbData, const char *type, bool isUnicode, const char *str) {
+  (void)cbData;
+  Serial.printf("[StreamMeta] type=%s | isUnicode=%s | value=%s\n",
+                type ? type : "(null)",
+                isUnicode ? "true" : "false",
+                str ? str : "(null)");
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {
