@@ -10,6 +10,40 @@
 
 #include "config.h"
 
+class DiagnosticAudioFileSourceICYStream : public AudioFileSourceICYStream {
+public:
+  DiagnosticAudioFileSourceICYStream();
+
+  bool open(const char *url) override;
+  uint32_t read(void *data, uint32_t len) override;
+  uint32_t readNonBlock(void *data, uint32_t len) override;
+  bool close() override;
+
+  void logStats(const char *context) const;
+  unsigned long getLastReadMs() const { return lastReadMs; }
+  unsigned long getLastOpenCompleteMs() const { return lastOpenCompleteMs; }
+  unsigned long getReadCalls() const { return readCalls; }
+  unsigned long long getTotalBytesReturned() const { return totalBytesReturned; }
+  unsigned long getConsecutiveZeroReads() const { return consecutiveZeroReads; }
+  uint32_t getLastReadLen() const { return lastReadLen; }
+
+private:
+  void resetReadTracking();
+  void logReadResult(uint32_t requested, uint32_t returned, uint32_t posBefore, unsigned long callMs, const char *mode);
+
+  unsigned long openAttempts;
+  bool lastOpenResult;
+  unsigned long lastOpenStartMs;
+  unsigned long lastOpenCompleteMs;
+  unsigned long readCalls;
+  unsigned long consecutiveZeroReads;
+  unsigned long long totalBytesReturned;
+  uint32_t lastReadLen;
+  unsigned long lastReadMs;
+  unsigned long firstNonZeroReadMs;
+  uint32_t maxReadLen;
+};
+
 static const uint16_t COLOR_BACKGROUND = TFT_BLACK;
 static const uint16_t COLOR_TEXT = TFT_WHITE;
 static const uint16_t COLOR_ACCENT = TFT_DARKGREEN;
@@ -61,7 +95,7 @@ String wifiStatusMessage = "Not connected";
 String streamStatusMessage = "Streaming stopped";
 
 AudioGeneratorMP3 *mp3 = nullptr;
-AudioFileSourceICYStream *streamFile = nullptr;
+DiagnosticAudioFileSourceICYStream *streamFile = nullptr;
 AudioOutputI2SNoDAC *audioOutput = nullptr;
 
 unsigned long streamingStartMillis = 0;
@@ -128,6 +162,7 @@ void logStreamSourceSummary(const char *context);
 void logStreamBufferState(const char *context);
 void logStreamReadProgress(const char *context, bool forceLog);
 void logStreamComponents(const char *context);
+void logStreamDiagnostics(const char *context);
 void logRecentStreamStatusEvents(const char *context);
 void resetStreamSourceStats(const char *context);
 void resetMp3StatusHistory(const char *context);
@@ -148,6 +183,287 @@ void updateStatusText();
 void connectToWifi();
 void handleTouch();
 bool readTouchPoint(int &screenX, int &screenY);
+
+DiagnosticAudioFileSourceICYStream::DiagnosticAudioFileSourceICYStream()
+    : AudioFileSourceICYStream(),
+      openAttempts(0),
+      lastOpenResult(false),
+      lastOpenStartMs(0),
+      lastOpenCompleteMs(0),
+      readCalls(0),
+      consecutiveZeroReads(0),
+      totalBytesReturned(0),
+      lastReadLen(0),
+      lastReadMs(0),
+      firstNonZeroReadMs(0),
+      maxReadLen(0) {}
+
+bool DiagnosticAudioFileSourceICYStream::open(const char *url) {
+  openAttempts++;
+  lastOpenStartMs = millis();
+  Serial.printf("[StreamDiag] open attempt #%lu | url=%s | startMs=%lu\n",
+                static_cast<unsigned long>(openAttempts),
+                url ? url : "(null)",
+                lastOpenStartMs);
+  bool result = AudioFileSourceICYStream::open(url);
+  lastOpenCompleteMs = millis();
+  lastOpenResult = result;
+  Serial.printf("[StreamDiag] open result=%s | elapsedMs=%lu | isOpen=%s | size=%u | pos=%u\n",
+                result ? "success" : "failure",
+                lastOpenCompleteMs - lastOpenStartMs,
+                isOpen() ? "true" : "false",
+                getSize(),
+                getPos());
+  if (result) {
+    resetReadTracking();
+  }
+  return result;
+}
+
+uint32_t DiagnosticAudioFileSourceICYStream::read(void *data, uint32_t len) {
+  unsigned long callMs = millis();
+  uint32_t posBefore = getPos();
+  uint32_t returned = AudioFileSourceICYStream::read(data, len);
+  logReadResult(len, returned, posBefore, callMs, "blocking");
+  return returned;
+}
+uint32_t DiagnosticAudioFileSourceICYStream::readNonBlock(void *data, uint32_t len) {
+  unsigned long callMs = millis();
+  uint32_t posBefore = getPos();
+  uint32_t returned = AudioFileSourceICYStream::readNonBlock(data, len);
+  logReadResult(len, returned, posBefore, callMs, "non-blocking");
+  return returned;
+}
+
+bool DiagnosticAudioFileSourceICYStream::close() {
+  unsigned long startMs = millis();
+  bool result = AudioFileSourceICYStream::close();
+  unsigned long elapsed = millis() - startMs;
+  Serial.printf("[StreamDiag] close called | elapsedMs=%lu | result=%s | openAfter=%s | pos=%u\n",
+                elapsed,
+                result ? "true" : "false",
+                isOpen() ? "true" : "false",
+                getPos());
+  return result;
+}
+
+void DiagnosticAudioFileSourceICYStream::logStats(const char *context) const {
+  unsigned long now = millis();
+  unsigned long sinceOpen = lastOpenCompleteMs ? (now - lastOpenCompleteMs) : 0;
+  unsigned long sinceLastRead = lastReadMs ? (now - lastReadMs) : sinceOpen;
+  Serial.printf("[StreamDiag] %s | openAttempts=%lu | lastOpenResult=%s | readCalls=%lu | totalBytes=%llu | consecutiveZeroReads=%lu | lastReadLen=%u | sinceLastReadMs=%lu | sinceOpenMs=%lu | maxReadLen=%u\n",
+                context ? context : "(no context)",
+                static_cast<unsigned long>(openAttempts),
+                lastOpenResult ? "true" : "false",
+                static_cast<unsigned long>(readCalls),
+                static_cast<unsigned long long>(totalBytesReturned),
+                static_cast<unsigned long>(consecutiveZeroReads),
+                lastReadLen,
+                sinceLastRead,
+                sinceOpen,
+                maxReadLen);
+}
+
+void DiagnosticAudioFileSourceICYStream::resetReadTracking() {
+  readCalls = 0;
+  consecutiveZeroReads = 0;
+  totalBytesReturned = 0;
+  lastReadLen = 0;
+  lastReadMs = 0;
+  firstNonZeroReadMs = 0;
+  maxReadLen = 0;
+}
+void DiagnosticAudioFileSourceICYStream::logReadResult(uint32_t requested,
+                                                       uint32_t returned,
+                                                       uint32_t posBefore,
+                                                       unsigned long callMs,
+                                                       const char *mode) {
+  (void)mode;
+  readCalls++;
+  lastReadLen = returned;
+  lastReadMs = callMs;
+  if (returned == 0) {
+    consecutiveZeroReads++;
+    if (consecutiveZeroReads <= 4 || (consecutiveZeroReads % 25) == 0) {
+      Serial.printf("[StreamDiag] read #%lu (%s) returned 0 bytes | requested=%u | posBefore=%u | posAfter=%u | isOpen=%s | consecutiveZero=%lu | sinceOpenMs=%lu\n",
+                    static_cast<unsigned long>(readCalls),
+                    mode,
+                    static_cast<unsigned int>(requested),
+                    posBefore,
+                    getPos(),
+                    isOpen() ? "true" : "false",
+                    static_cast<unsigned long>(consecutiveZeroReads),
+                    lastOpenCompleteMs ? (callMs - lastOpenCompleteMs) : 0);
+    }
+  } else {
+    if (consecutiveZeroReads >= 5) {
+      Serial.printf("[StreamDiag] Recovered from %lu consecutive zero-byte reads.\n",
+                    static_cast<unsigned long>(consecutiveZeroReads));
+    }
+    consecutiveZeroReads = 0;
+    totalBytesReturned += returned;
+    if (returned > maxReadLen) {
+      maxReadLen = returned;
+    }
+    if (firstNonZeroReadMs == 0) {
+      firstNonZeroReadMs = callMs;
+      Serial.printf("[StreamDiag] First non-zero read after open | delayMs=%lu | bytes=%u\n",
+                    lastOpenCompleteMs ? (callMs - lastOpenCompleteMs) : 0,
+                    static_cast<unsigned int>(returned));
+    }
+    if (readCalls <= 5 || (readCalls % 100) == 0) {
+      Serial.printf("[StreamDiag] read #%lu (%s) | requested=%u | returned=%u | posBefore=%u | posAfter=%u | totalBytes=%llu\n",
+                    static_cast<unsigned long>(readCalls),
+                    mode,
+                    static_cast<unsigned int>(requested),
+                    static_cast<unsigned int>(returned),
+                    posBefore,
+                    getPos(),
+                    static_cast<unsigned long long>(totalBytesReturned));
+    }
+  }
+}
+DiagnosticAudioFileSourceICYStream::DiagnosticAudioFileSourceICYStream()
+    : AudioFileSourceICYStream(),
+      openAttempts(0),
+      lastOpenResult(false),
+      lastOpenStartMs(0),
+      lastOpenCompleteMs(0),
+      readCalls(0),
+      consecutiveZeroReads(0),
+      totalBytesReturned(0),
+      lastReadLen(0),
+      lastReadMs(0),
+      firstNonZeroReadMs(0),
+      maxReadLen(0) {}
+
+bool DiagnosticAudioFileSourceICYStream::open(const char *url) {
+  openAttempts++;
+  lastOpenStartMs = millis();
+  Serial.printf("[StreamDiag] open attempt #%lu | url=%s | startMs=%lu\n",
+                static_cast<unsigned long>(openAttempts),
+                url ? url : "(null)",
+                lastOpenStartMs);
+  bool result = AudioFileSourceICYStream::open(url);
+  lastOpenCompleteMs = millis();
+  lastOpenResult = result;
+  Serial.printf("[StreamDiag] open result=%s | elapsedMs=%lu | isOpen=%s | size=%u | pos=%u\n",
+                result ? "success" : "failure",
+                lastOpenCompleteMs - lastOpenStartMs,
+                isOpen() ? "true" : "false",
+                getSize(),
+                getPos());
+  if (result) {
+    resetReadTracking();
+  }
+  return result;
+}
+
+uint32_t DiagnosticAudioFileSourceICYStream::read(void *data, uint32_t len) {
+  unsigned long callMs = millis();
+  uint32_t posBefore = getPos();
+  uint32_t returned = AudioFileSourceICYStream::read(data, len);
+  logReadResult(len, returned, posBefore, callMs, "blocking");
+  return returned;
+}
+
+uint32_t DiagnosticAudioFileSourceICYStream::readNonBlock(void *data, uint32_t len) {
+  unsigned long callMs = millis();
+  uint32_t posBefore = getPos();
+  uint32_t returned = AudioFileSourceICYStream::readNonBlock(data, len);
+  logReadResult(len, returned, posBefore, callMs, "non-blocking");
+  return returned;
+}
+
+bool DiagnosticAudioFileSourceICYStream::close() {
+  unsigned long startMs = millis();
+  bool result = AudioFileSourceICYStream::close();
+  unsigned long elapsed = millis() - startMs;
+  Serial.printf("[StreamDiag] close called | elapsedMs=%lu | result=%s | openAfter=%s | pos=%u\n",
+                elapsed,
+                result ? "true" : "false",
+                isOpen() ? "true" : "false",
+                getPos());
+  return result;
+}
+
+void DiagnosticAudioFileSourceICYStream::logStats(const char *context) const {
+  unsigned long now = millis();
+  unsigned long sinceOpen = lastOpenCompleteMs ? (now - lastOpenCompleteMs) : 0;
+  unsigned long sinceLastRead = lastReadMs ? (now - lastReadMs) : sinceOpen;
+  Serial.printf("[StreamDiag] %s | openAttempts=%lu | lastOpenResult=%s | readCalls=%lu | totalBytes=%llu | consecutiveZeroReads=%lu | lastReadLen=%u | sinceLastReadMs=%lu | sinceOpenMs=%lu | maxReadLen=%u\n",
+                context ? context : "(no context)",
+                static_cast<unsigned long>(openAttempts),
+                lastOpenResult ? "true" : "false",
+                static_cast<unsigned long>(readCalls),
+                static_cast<unsigned long long>(totalBytesReturned),
+                static_cast<unsigned long>(consecutiveZeroReads),
+                lastReadLen,
+                sinceLastRead,
+                sinceOpen,
+                maxReadLen);
+}
+
+void DiagnosticAudioFileSourceICYStream::resetReadTracking() {
+  readCalls = 0;
+  consecutiveZeroReads = 0;
+  totalBytesReturned = 0;
+  lastReadLen = 0;
+  lastReadMs = 0;
+  firstNonZeroReadMs = 0;
+  maxReadLen = 0;
+}
+
+void DiagnosticAudioFileSourceICYStream::logReadResult(uint32_t requested,
+                                                       uint32_t returned,
+                                                       uint32_t posBefore,
+                                                       unsigned long callMs,
+                                                       const char *mode) {
+  (void)mode;
+  readCalls++;
+  lastReadLen = returned;
+  lastReadMs = callMs;
+  if (returned == 0) {
+    consecutiveZeroReads++;
+    if (consecutiveZeroReads <= 4 || (consecutiveZeroReads % 25) == 0) {
+      Serial.printf("[StreamDiag] read #%lu (%s) returned 0 bytes | requested=%u | posBefore=%u | posAfter=%u | isOpen=%s | consecutiveZero=%lu | sinceOpenMs=%lu\n",
+                    static_cast<unsigned long>(readCalls),
+                    mode,
+                    static_cast<unsigned int>(requested),
+                    posBefore,
+                    getPos(),
+                    isOpen() ? "true" : "false",
+                    static_cast<unsigned long>(consecutiveZeroReads),
+                    lastOpenCompleteMs ? (callMs - lastOpenCompleteMs) : 0);
+    }
+  } else {
+    if (consecutiveZeroReads >= 5) {
+      Serial.printf("[StreamDiag] Recovered from %lu consecutive zero-byte reads.\n",
+                    static_cast<unsigned long>(consecutiveZeroReads));
+    }
+    consecutiveZeroReads = 0;
+    totalBytesReturned += returned;
+    if (returned > maxReadLen) {
+      maxReadLen = returned;
+    }
+    if (firstNonZeroReadMs == 0) {
+      firstNonZeroReadMs = callMs;
+      Serial.printf("[StreamDiag] First non-zero read after open | delayMs=%lu | bytes=%u\n",
+                    lastOpenCompleteMs ? (callMs - lastOpenCompleteMs) : 0,
+                    static_cast<unsigned int>(returned));
+    }
+    if (readCalls <= 5 || (readCalls % 100) == 0) {
+      Serial.printf("[StreamDiag] read #%lu (%s) | requested=%u | returned=%u | posBefore=%u | posAfter=%u | totalBytes=%llu\n",
+                    static_cast<unsigned long>(readCalls),
+                    mode,
+                    static_cast<unsigned int>(requested),
+                    static_cast<unsigned int>(returned),
+                    posBefore,
+                    getPos(),
+                    static_cast<unsigned long long>(totalBytesReturned));
+    }
+  }
+}
 
 bool probeStreamUrl(const char *url) {
   if (!url || strlen(url) == 0) {
@@ -352,6 +668,33 @@ void loop() {
     }
   }
 
+  static unsigned long lastStallDiagnosticMs = 0;
+  if (streamingEnabled && streamFile) {
+    unsigned long sinceOpen = streamFile->getLastOpenCompleteMs() ? (nowMillis - streamFile->getLastOpenCompleteMs()) : 0;
+    unsigned long lastReadMs = streamFile->getLastReadMs();
+    unsigned long sinceLastRead = lastReadMs ? (nowMillis - lastReadMs) : sinceOpen;
+    bool noBytesYet = streamFile->getTotalBytesReturned() == 0;
+    bool stalled = (sinceOpen > 1500 && sinceLastRead > 1000 && noBytesYet) ||
+                   streamFile->getConsecutiveZeroReads() >= 5;
+    if (stalled && (nowMillis - lastStallDiagnosticMs > 1000)) {
+      lastStallDiagnosticMs = nowMillis;
+      Serial.printf("[StreamDiag] Loop stall detector | sinceOpenMs=%lu | sinceLastReadMs=%lu | totalBytes=%llu | readCalls=%lu | consecutiveZero=%lu | lastReadLen=%u\n",
+                    sinceOpen,
+                    sinceLastRead,
+                    static_cast<unsigned long long>(streamFile->getTotalBytesReturned()),
+                    streamFile->getReadCalls(),
+                    streamFile->getConsecutiveZeroReads(),
+                    streamFile->getLastReadLen());
+      logStreamDiagnostics("Loop stall detector");
+      logStreamBufferState("Loop stall detector");
+      logStreamReadProgress("Loop stall detector", true);
+      logStreamSourceSummary("Loop stall detector");
+      logRecentStreamStatusEvents("Loop stall detector");
+    }
+  } else {
+    lastStallDiagnosticMs = nowMillis;
+  }
+
   delay(10);
 }
 
@@ -521,7 +864,7 @@ void startStreaming() {
   Serial.printf("[StreamProbe] Pre-open probe result: %s\n", probeSuccess ? "success" : "failure");
   logHeapUsage("Before stream source allocation");
 
-  streamFile = new AudioFileSourceICYStream();
+  streamFile = new DiagnosticAudioFileSourceICYStream();
   if (!streamFile) {
     streamStatusMessage = "Stream failed";
     cleanupStream("Stream allocation failure");
@@ -539,6 +882,7 @@ void startStreaming() {
   Serial.println("Configured stream source callbacks, reconnect policy, and HTTP/1.0 mode.");
 
   logStreamBufferState("After stream source allocation");
+  logStreamDiagnostics("After stream source allocation");
 
   resetStreamSourceStats("Start streaming - after source allocation");
   resetStreamReadStats("Start streaming - before stream open");
@@ -547,6 +891,7 @@ void startStreaming() {
     streamStatusMessage = "Stream failed";
     logStreamBufferState("Stream open failure");
     logStreamReadProgress("Stream open failure", true);
+    logStreamDiagnostics("Stream open failure");
     cleanupStream("Stream open failure");
     streamingEnabled = false;
     Serial.println("Failed to open stream URL.");
@@ -563,6 +908,7 @@ void startStreaming() {
   resetStreamReadStats("After stream open");
   logStreamReadProgress("After stream open", true);
   logStreamBufferState("After stream open");
+  logStreamDiagnostics("After stream open");
   logWifiDetails("After stream open");
   logHeapUsage("After stream source allocation");
   logStreamComponents("After stream source allocation");
@@ -653,6 +999,7 @@ void stopStreaming(const char *reason) {
   logStreamSourceSummary("Stop streaming (pre-cleanup)");
   logStreamComponents("Stop streaming (pre-cleanup)");
   logStreamBufferState("Stop streaming (pre-cleanup)");
+  logStreamDiagnostics("Stop streaming (pre-cleanup)");
   logRecentStreamStatusEvents("Stop streaming (pre-cleanup)");
   logRecentMp3StatusEvents("Stop streaming (pre-cleanup)");
   if (mp3) {
@@ -677,6 +1024,7 @@ void cleanupStream(const char *context) {
   }
   logStreamSourceSummary("Cleanup start");
   logStreamBufferState("Cleanup start");
+  logStreamDiagnostics("Cleanup start");
   logStreamReadProgress("Cleanup start", true);
   if (mp3) {
     Serial.println("Releasing MP3 decoder instance.");
@@ -698,6 +1046,7 @@ void cleanupStream(const char *context) {
                   streamFile->getPos(),
                   streamFile->getSize());
     logStreamBufferState("Cleanup before stream close");
+    logStreamDiagnostics("Cleanup before stream close");
     streamFile->close();
     delete streamFile;
     streamFile = nullptr;
@@ -948,6 +1297,16 @@ void logStreamComponents(const char *context) {
   Serial.printf("[StreamComponents] statusMessages | wifi=\"%s\" | stream=\"%s\"\n",
                 wifiStatusMessage.c_str(),
                 streamStatusMessage.c_str());
+  logStreamDiagnostics(label);
+}
+
+void logStreamDiagnostics(const char *context) {
+  const char *label = context ? context : "(no context)";
+  if (!streamFile) {
+    Serial.printf("[StreamDiag] %s | streamFile pointer is null\n", label);
+    return;
+  }
+  streamFile->logStats(label);
 }
 
 void logRecentMp3StatusEvents(const char *context) {
@@ -1217,6 +1576,7 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
     logWifiDetails("Stream source no data");
     logStreamingState("Stream source no data");
     logStreamBufferState("Stream source no data");
+    logStreamDiagnostics("Stream source no data");
     logRecentStreamStatusEvents("Stream source no data");
     logRecentMp3StatusEvents("Stream source no data");
     if (streamSourceStats.consecutiveNoData % 3 == 0) {
@@ -1229,6 +1589,7 @@ void streamSourceStatusCallback(void *cbData, int code, const char *string) {
     logStreamingState("Stream source reconnect/ disconnect");
     logStreamSourceSummary("Stream source reconnect/ disconnect");
     logStreamBufferState("Stream source reconnect/ disconnect");
+    logStreamDiagnostics("Stream source reconnect/ disconnect");
     logRecentStreamStatusEvents("Stream source reconnect/ disconnect");
     logRecentMp3StatusEvents("Stream source reconnect/ disconnect");
   }
