@@ -64,12 +64,14 @@ void setup() {
   delay(100);
 
   tft.begin();
-  tft.setRotation(1);
+  tft.setRotation(0);
   tft.fillScreen(COLOR_BACKGROUND);
 
   int buttonWidth = tft.width() - 60;
-  int buttonHeight = 120;
-  streamButton = { (tft.width() - buttonWidth) / 2, (tft.height() - buttonHeight) / 2, buttonWidth, buttonHeight };
+  int buttonHeight = 100;
+  int buttonX = (tft.width() - buttonWidth) / 2;
+  int buttonY = tft.height() - buttonHeight - 30;
+  streamButton = { buttonX, buttonY, buttonWidth, buttonHeight };
 
   drawLayout();
   connectToWifi();
@@ -92,12 +94,11 @@ void drawLayout() {
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
   tft.setTextSize(3);
-  tft.drawString("ESP32 Streamer", tft.width() / 2, 30);
+  tft.drawString("ESP32 Streamer", tft.width() / 2, 40);
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
-  tft.drawString("WiFi", 20, 70);
-  tft.drawString("Stream", 20, 120);
+  tft.drawString("Status", 20, 100);
 
   drawStreamButton();
   updateStatusText();
@@ -121,25 +122,25 @@ void updateStatusText() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(2);
 
-  int statusAreaX = 140;
-  int wifiStatusY = 70;
-  int streamStatusY = 120;
-  int statusWidth = tft.width() - statusAreaX - 20;
-  int statusHeight = 80;
+  const int statusAreaX = 20;
+  const int statusAreaY = 130;
+  const int statusLineHeight = 28;
+  const int statusWidth = tft.width() - 40;
+  const int statusHeight = (statusLineHeight * 2) + 8;
 
-  tft.fillRect(statusAreaX, wifiStatusY - 4, statusWidth, statusHeight, COLOR_BACKGROUND);
+  tft.fillRect(statusAreaX, statusAreaY - 4, statusWidth, statusHeight, COLOR_BACKGROUND);
 
   if (WiFi.status() == WL_CONNECTED) {
     IPAddress ip = WiFi.localIP();
     String wifiStatus = String("Connected (IP: ") + ip.toString() + ")";
-    tft.drawString(wifiStatus, statusAreaX, wifiStatusY);
+    tft.drawString(wifiStatus, statusAreaX, statusAreaY);
   } else {
-    tft.drawString("Not connected", statusAreaX, wifiStatusY);
+    tft.drawString("Not connected", statusAreaX, statusAreaY);
   }
 
   tft.drawString(streamingEnabled ? "Streaming enabled" : "Streaming stopped",
                  statusAreaX,
-                 streamStatusY);
+                 statusAreaY + statusLineHeight);
 }
 
 void connectToWifi() {
