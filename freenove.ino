@@ -2,6 +2,9 @@
 #include <WiFi.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2SNoDAC.h>
 
 #include "config.h"
 
@@ -53,6 +56,15 @@ unsigned long lastTouchTime = 0;
 unsigned long lastWifiAttempt = 0;
 bool wifiConnected = false;
 String wifiStatusMessage = "Not connected";
+String streamStatusMessage = "Streaming stopped";
+
+AudioGeneratorMP3 *mp3 = nullptr;
+AudioFileSourceICYStream *streamFile = nullptr;
+AudioOutputI2SNoDAC *audioOutput = nullptr;
+
+void startStreaming();
+void stopStreaming();
+void cleanupStream();
 
 void drawLayout();
 void drawStreamButton();
@@ -83,14 +95,43 @@ void setup() {
 void loop() {
   handleTouch();
 
+  if (!wifiConnected && WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    wifiStatusMessage = WiFi.localIP().toString();
+    updateStatusText();
+  }
+
   if (WiFi.status() != WL_CONNECTED && wifiConnected) {
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection lost";
+    if (streamingEnabled) {
+      stopStreaming();
+      streamingEnabled = false;
+      drawStreamButton();
+    }
     updateStatusText();
   }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
     connectToWifi();
+  }
+
+  if (streamingEnabled && mp3) {
+    if (mp3->isRunning()) {
+      if (!mp3->loop()) {
+        streamStatusMessage = "Stream stopped";
+        stopStreaming();
+        streamingEnabled = false;
+        drawStreamButton();
+        updateStatusText();
+      }
+    } else {
+      streamStatusMessage = "Stream stopped";
+      stopStreaming();
+      streamingEnabled = false;
+      drawStreamButton();
+      updateStatusText();
+    }
   }
 
   delay(10);
@@ -140,7 +181,7 @@ void updateStatusText() {
 
   tft.drawString(wifiStatusMessage, statusAreaX, statusAreaY);
 
-  tft.drawString(streamingEnabled ? "Streaming enabled" : "Streaming stopped",
+  tft.drawString(streamStatusMessage,
                  statusAreaX,
                  statusAreaY + statusLineHeight);
 }
@@ -204,9 +245,75 @@ void handleTouch() {
 
   if (insideButton) {
     streamingEnabled = !streamingEnabled;
-    Serial.println(streamingEnabled ? "Stream started" : "Stream stopped");
+    if (streamingEnabled) {
+      startStreaming();
+    } else {
+      stopStreaming();
+    }
     drawStreamButton();
     updateStatusText();
+  }
+}
+
+void startStreaming() {
+  if (WiFi.status() != WL_CONNECTED) {
+    streamStatusMessage = "WiFi required";
+    streamingEnabled = false;
+    return;
+  }
+
+  cleanupStream();
+
+  streamStatusMessage = "Connecting...";
+  updateStatusText();
+
+  streamFile = new AudioFileSourceICYStream();
+  if (!streamFile || !streamFile->open(STREAM_URL)) {
+    streamStatusMessage = "Stream failed";
+    cleanupStream();
+    streamingEnabled = false;
+    return;
+  }
+
+  audioOutput = new AudioOutputI2SNoDAC();
+  audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
+  audioOutput->SetOutputModeMono(true);
+  audioOutput->SetGain(0.8f);
+
+  mp3 = new AudioGeneratorMP3();
+  if (!mp3->begin(streamFile, audioOutput)) {
+    streamStatusMessage = "Decoder error";
+    cleanupStream();
+    streamingEnabled = false;
+    return;
+  }
+
+  streamStatusMessage = "Streaming...";
+}
+
+void stopStreaming() {
+  if (mp3) {
+    if (mp3->isRunning()) {
+      mp3->stop();
+    }
+  }
+  cleanupStream();
+  streamStatusMessage = "Streaming stopped";
+}
+
+void cleanupStream() {
+  if (mp3) {
+    delete mp3;
+    mp3 = nullptr;
+  }
+  if (audioOutput) {
+    delete audioOutput;
+    audioOutput = nullptr;
+  }
+  if (streamFile) {
+    streamFile->close();
+    delete streamFile;
+    streamFile = nullptr;
   }
 }
 
