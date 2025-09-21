@@ -70,8 +70,7 @@ echo "==> Installing ESP32 core"
 retry 5 5 arduino-cli core install esp32:esp32
 
 echo "==> Installing libraries"
-retry 5 5 arduino-cli lib install "ArduinoJson"
 retry 5 5 arduino-cli lib install "TFT_eSPI"
 
 echo "✅ Setup complete. Compile with:"
-echo "   arduino-cli compile --fqbn esp32:esp32:esp32 sketches/freenove"
+echo "   arduino-cli compile --fqbn esp32:esp32:esp32 ."
