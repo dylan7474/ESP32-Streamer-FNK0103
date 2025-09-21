@@ -67,6 +67,23 @@ unsigned long lastMp3LoopMs = 0;
 uint32_t mp3LoopIterations = 0;
 uint32_t mp3LoopFailures = 0;
 
+struct StreamSourceStats {
+  uint32_t totalCallbacks;
+  uint32_t noDataEvents;
+  uint32_t disconnectEvents;
+  uint32_t reconnectAttempts;
+  uint32_t reconnectSuccesses;
+  uint32_t consecutiveSameCode;
+  uint32_t consecutiveNoData;
+  int lastCode;
+  unsigned long firstCallbackMs;
+  unsigned long lastCallbackMs;
+  unsigned long lastCodeChangeMs;
+  unsigned long lastNoDataMs;
+};
+
+StreamSourceStats streamSourceStats = {};
+
 void startStreaming();
 void stopStreaming(const char *reason = nullptr);
 void cleanupStream(const char *context = nullptr);
@@ -74,6 +91,9 @@ void logStreamingState(const char *context);
 void logHeapUsage(const char *context);
 void logWifiDetails(const char *context);
 void logMp3LoopDiagnostics(const char *context);
+void logStreamSourceSummary(const char *context);
+void resetStreamSourceStats(const char *context);
+const char *streamSourceStatusToString(int code);
 void mp3StatusCallback(void *cbData, int code, const char *string);
 void streamSourceStatusCallback(void *cbData, int code, const char *string);
 void streamMetadataCallback(void *cbData, const char *type, bool isUnicode, const char *str);
@@ -361,6 +381,8 @@ void startStreaming() {
   streamFile->useHTTP10();
   Serial.println("Configured stream source callbacks, reconnect policy, and HTTP/1.0 mode.");
 
+  resetStreamSourceStats("Start streaming - after source allocation");
+
   if (!streamFile->open(STREAM_URL)) {
     streamStatusMessage = "Stream failed";
     cleanupStream("Stream open failure");
@@ -448,6 +470,7 @@ void stopStreaming(const char *reason) {
                 static_cast<unsigned long>(mp3LoopIterations),
                 static_cast<unsigned long>(mp3LoopFailures));
   logMp3LoopDiagnostics(resolvedReason);
+  logStreamSourceSummary("Stop streaming (pre-cleanup)");
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
@@ -468,6 +491,7 @@ void cleanupStream(const char *context) {
     Serial.print("Cleaning up stream resources. Context: ");
     Serial.println(context);
   }
+  logStreamSourceSummary("Cleanup start");
   if (mp3) {
     Serial.println("Releasing MP3 decoder instance.");
     delete mp3;
@@ -498,6 +522,7 @@ void cleanupStream(const char *context) {
   lastMp3LoopMs = 0;
   mp3LoopIterations = 0;
   mp3LoopFailures = 0;
+  resetStreamSourceStats("Cleanup complete");
 }
 
 void logStreamingState(const char *context) {
@@ -567,6 +592,63 @@ void logMp3LoopDiagnostics(const char *context) {
   logHeapUsage("MP3 diagnostics");
 }
 
+void logStreamSourceSummary(const char *context) {
+  const char *label = context ? context : "(no context)";
+  if (streamSourceStats.totalCallbacks == 0) {
+    Serial.printf("[StreamSourceSummary] %s | no status callbacks recorded yet\n", label);
+    return;
+  }
+  Serial.printf("[StreamSourceSummary] %s | totalCallbacks=%lu | lastCode=%d (%s) | consecutiveSame=%lu | noDataEvents=%lu | consecutiveNoData=%lu | disconnects=%lu | reconnectAttempts=%lu | reconnectSuccesses=%lu | firstCallbackMs=%lu | lastCallbackMs=%lu | lastCodeChangeMs=%lu | lastNoDataMs=%lu\n",
+                label,
+                static_cast<unsigned long>(streamSourceStats.totalCallbacks),
+                streamSourceStats.lastCode,
+                streamSourceStatusToString(streamSourceStats.lastCode),
+                static_cast<unsigned long>(streamSourceStats.consecutiveSameCode),
+                static_cast<unsigned long>(streamSourceStats.noDataEvents),
+                static_cast<unsigned long>(streamSourceStats.consecutiveNoData),
+                static_cast<unsigned long>(streamSourceStats.disconnectEvents),
+                static_cast<unsigned long>(streamSourceStats.reconnectAttempts),
+                static_cast<unsigned long>(streamSourceStats.reconnectSuccesses),
+                streamSourceStats.firstCallbackMs,
+                streamSourceStats.lastCallbackMs,
+                streamSourceStats.lastCodeChangeMs,
+                streamSourceStats.lastNoDataMs);
+}
+
+void resetStreamSourceStats(const char *context) {
+  if (context) {
+    Serial.print("[StreamSourceStats] Reset requested. Context: ");
+    Serial.println(context);
+  }
+  streamSourceStats = {};
+  streamSourceStats.lastCode = -1;
+  streamSourceStats.firstCallbackMs = 0;
+  streamSourceStats.lastCallbackMs = 0;
+  streamSourceStats.lastCodeChangeMs = 0;
+  streamSourceStats.lastNoDataMs = 0;
+}
+
+const char *streamSourceStatusToString(int code) {
+  switch (code) {
+    case 0:
+      return "Idle";
+    case 1:
+      return "Connecting";
+    case 2:
+      return "Connected";
+    case 3:
+      return "Stream disconnected";
+    case 4:
+      return "Reconnect attempt";
+    case 5:
+      return "Reconnect success";
+    case 6:
+      return "No stream data";
+    default:
+      return "Unknown";
+  }
+}
+
 void mp3StatusCallback(void *cbData, int code, const char *string) {
   (void)cbData;
   Serial.printf("[MP3Status] code=%d | message=%s\n", code, string ? string : "(null)");
@@ -574,7 +656,87 @@ void mp3StatusCallback(void *cbData, int code, const char *string) {
 
 void streamSourceStatusCallback(void *cbData, int code, const char *string) {
   (void)cbData;
-  Serial.printf("[StreamSourceStatus] code=%d | message=%s\n", code, string ? string : "(null)");
+  unsigned long now = millis();
+  unsigned long sinceStreamStart = streamingStartMillis ? (now - streamingStartMillis) : 0;
+  unsigned long sinceLastCallback = streamSourceStats.lastCallbackMs ? (now - streamSourceStats.lastCallbackMs) : 0;
+
+  if (streamSourceStats.totalCallbacks == 0) {
+    streamSourceStats.firstCallbackMs = now;
+  }
+
+  streamSourceStats.totalCallbacks++;
+
+  if (streamSourceStats.lastCode == code) {
+    streamSourceStats.consecutiveSameCode++;
+  } else {
+    streamSourceStats.lastCode = code;
+    streamSourceStats.consecutiveSameCode = 1;
+    streamSourceStats.lastCodeChangeMs = now;
+  }
+
+  switch (code) {
+    case 3:
+      streamSourceStats.disconnectEvents++;
+      break;
+    case 4:
+      streamSourceStats.reconnectAttempts++;
+      break;
+    case 5:
+      streamSourceStats.reconnectSuccesses++;
+      break;
+    case 6:
+      streamSourceStats.noDataEvents++;
+      streamSourceStats.consecutiveNoData++;
+      streamSourceStats.lastNoDataMs = now;
+      break;
+    default:
+      streamSourceStats.consecutiveNoData = 0;
+      break;
+  }
+
+  if (code != 6) {
+    streamSourceStats.consecutiveNoData = 0;
+  }
+
+  Serial.printf("[StreamSourceStatus] code=%d (%s) | message=%s | callbacks=%lu | consecutiveSame=%lu | consecutiveNoData=%lu | sinceStart=%lums | sinceLast=%lums\n",
+                code,
+                streamSourceStatusToString(code),
+                string ? string : "(null)",
+                static_cast<unsigned long>(streamSourceStats.totalCallbacks),
+                static_cast<unsigned long>(streamSourceStats.consecutiveSameCode),
+                static_cast<unsigned long>(streamSourceStats.consecutiveNoData),
+                sinceStreamStart,
+                sinceLastCallback);
+
+  if (streamFile) {
+    Serial.printf("[StreamSourceStatus] StreamState | isOpen=%s | pos=%u | size=%u\n",
+                  streamFile->isOpen() ? "true" : "false",
+                  streamFile->getPos(),
+                  streamFile->getSize());
+  } else {
+    Serial.println("[StreamSourceStatus] StreamState | streamFile pointer is null");
+  }
+
+  Serial.printf("[StreamSourceStatus] MP3 running=%s | audioOutput=%p\n",
+                (mp3 && mp3->isRunning()) ? "true" : "false",
+                audioOutput);
+
+  if (code == 6) {
+    Serial.println("[StreamSourceStatus] Detected 'no data' condition. Logging WiFi and stream state.");
+    logWifiDetails("Stream source no data");
+    logStreamingState("Stream source no data");
+    if (streamSourceStats.consecutiveNoData % 3 == 0) {
+      logHeapUsage("Stream source repeated no data");
+      logStreamSourceSummary("Stream source repeated no data");
+    }
+  } else if (code == 3 || code == 4) {
+    Serial.println("[StreamSourceStatus] Connection instability detected. Capturing diagnostics.");
+    logWifiDetails("Stream source reconnect/ disconnect");
+    logStreamingState("Stream source reconnect/ disconnect");
+    logStreamSourceSummary("Stream source reconnect/ disconnect");
+  }
+
+  streamSourceStats.lastCallbackMs = now;
 }
 
 void streamMetadataCallback(void *cbData, const char *type, bool isUnicode, const char *str) {
