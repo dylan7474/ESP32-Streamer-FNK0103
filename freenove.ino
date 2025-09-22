@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 #include <AudioOutputI2SNoDAC.h>
 
 #include "config.h"
@@ -60,7 +61,8 @@ String streamStatusMessage = "Streaming stopped";
 
 AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
-AudioOutputI2SNoDAC *audioOutput = nullptr;
+AudioOutput *audioOutput = nullptr;
+AudioOutputI2S *audioI2S = nullptr;
 
 void startStreaming();
 void stopStreaming();
@@ -300,9 +302,51 @@ void startStreaming() {
   Serial.print("[STREAM] Connected to stream URL: ");
   Serial.println(STREAM_URL);
 
-  audioOutput = new AudioOutputI2SNoDAC();
-  audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
-  audioOutput->SetOutputModeMono(true);
+  bool useExternalI2S = I2S_SPEAKER_BCLK_PIN >= 0 && I2S_SPEAKER_LRCLK_PIN >= 0;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_SPEAKER_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_SPEAKER_LRCLK_PIN);
+    Serial.print(", DATA=");
+    Serial.println(I2S_SPEAKER_DATA_PIN);
+    audioI2S = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_SPEAKER_DATA_PIN);
+    audioI2S = new AudioOutputI2SNoDAC();
+  }
+
+  if (!audioI2S) {
+    streamStatusMessage = "Audio init failed";
+    cleanupStream();
+    streamingEnabled = false;
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    return;
+  }
+
+  audioOutput = audioI2S;
+
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = audioI2S->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
+  } else {
+    if (I2S_SPEAKER_DATA_PIN < 0) {
+      Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_SPEAKER_DATA_PIN.");
+    } else {
+      pinoutOk = audioI2S->SetPinout(-1, -1, I2S_SPEAKER_DATA_PIN);
+    }
+  }
+
+  if (!pinoutOk) {
+    streamStatusMessage = "Audio pin error";
+    cleanupStream();
+    streamingEnabled = false;
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    return;
+  }
+
+  audioI2S->SetOutputModeMono(true);
   audioOutput->SetGain(0.8f);
   Serial.println("[STREAM] Audio output configured.");
 
@@ -340,6 +384,7 @@ void cleanupStream() {
   if (audioOutput) {
     delete audioOutput;
     audioOutput = nullptr;
+    audioI2S = nullptr;
   }
   if (streamFile) {
     streamFile->close();
