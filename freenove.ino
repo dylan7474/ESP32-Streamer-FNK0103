@@ -112,6 +112,7 @@ void loop() {
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection lost";
     if (streamingEnabled) {
+      Serial.println("[STREAM] WiFi connection lost during playback. Stopping stream.");
       stopStreaming();
       streamingEnabled = false;
       drawStreamButton();
@@ -247,14 +248,8 @@ void handleTouch() {
     return;
   }
 
-  Serial.print("[TOUCH] Raw touch detected at: ");
-  Serial.print(touchX);
-  Serial.print(", ");
-  Serial.println(touchY);
-
   unsigned long now = millis();
   if (now - lastTouchTime < TOUCH_DEBOUNCE_MS) {
-    Serial.println("[TOUCH] Ignored due to debounce window.");
     return;
   }
   lastTouchTime = now;
@@ -263,8 +258,10 @@ void handleTouch() {
                       touchY >= streamButton.y && touchY <= (streamButton.y + streamButton.h);
 
   if (insideButton) {
-    Serial.println("[TOUCH] Stream button pressed.");
-    streamingEnabled = !streamingEnabled;
+    bool requestStart = !streamingEnabled;
+    streamingEnabled = requestStart;
+    Serial.println(requestStart ? "[STREAM] Start requested from touch UI." :
+                                      "[STREAM] Stop requested from touch UI.");
     if (streamingEnabled) {
       startStreaming();
     } else {
@@ -272,8 +269,6 @@ void handleTouch() {
     }
     drawStreamButton();
     updateStatusText();
-  } else {
-    Serial.println("[TOUCH] Touch outside control region.");
   }
 }
 
