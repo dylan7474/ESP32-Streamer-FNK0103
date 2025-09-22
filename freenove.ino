@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 #include <AudioOutputI2SNoDAC.h>
 
 #include "config.h"
@@ -60,7 +61,8 @@ String streamStatusMessage = "Streaming stopped";
 
 AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
-AudioOutputI2SNoDAC *audioOutput = nullptr;
+AudioOutput *audioOutput = nullptr;
+AudioOutputI2S *audioI2S = nullptr;
 
 void startStreaming();
 void stopStreaming();
@@ -77,9 +79,13 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  Serial.println("\n[SETUP] Initialising TFT display and touch controller...");
+
   tft.begin();
   tft.setRotation(0);
   tft.fillScreen(COLOR_BACKGROUND);
+
+  Serial.println("[SETUP] Display initialised. Preparing UI layout.");
 
   int buttonWidth = tft.width() - 60;
   int buttonHeight = 100;
@@ -88,6 +94,7 @@ void setup() {
   streamButton = { buttonX, buttonY, buttonWidth, buttonHeight };
 
   drawLayout();
+  Serial.println("[SETUP] Layout drawn. Attempting WiFi connection.");
   connectToWifi();
   updateStatusText();
 }
@@ -99,20 +106,25 @@ void loop() {
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
     updateStatusText();
+    Serial.print("[WIFI] Connection restored. IP address: ");
+    Serial.println(wifiStatusMessage);
   }
 
   if (WiFi.status() != WL_CONNECTED && wifiConnected) {
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection lost";
     if (streamingEnabled) {
+      Serial.println("[STREAM] WiFi connection lost during playback. Stopping stream.");
       stopStreaming();
       streamingEnabled = false;
       drawStreamButton();
     }
     updateStatusText();
+    Serial.println("[WIFI] Connection lost. Streaming disabled.");
   }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
+    Serial.println("[WIFI] Connection lost. Retrying WiFi connection...");
     connectToWifi();
   }
 
@@ -124,6 +136,7 @@ void loop() {
         streamingEnabled = false;
         drawStreamButton();
         updateStatusText();
+        Serial.println("[STREAM] Stream loop returned false. Stream stopped.");
       }
     } else {
       streamStatusMessage = "Stream stopped";
@@ -131,6 +144,7 @@ void loop() {
       streamingEnabled = false;
       drawStreamButton();
       updateStatusText();
+      Serial.println("[STREAM] Decoder reported not running. Stream stopped.");
     }
   }
 
@@ -200,7 +214,7 @@ void connectToWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  Serial.print("Connecting to WiFi network: ");
+  Serial.print("[WIFI] Connecting to WiFi network: ");
   Serial.println(WIFI_SSID);
 
   wifiConnected = false;
@@ -210,15 +224,17 @@ void connectToWifi() {
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
+    Serial.print('.');
   }
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Connected. IP address: ");
+    Serial.print("[WIFI] Connected. IP address: ");
     Serial.println(WiFi.localIP());
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
   } else {
-    Serial.println("WiFi connection timed out.");
+    Serial.println("[WIFI] Connection timed out.");
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection timed out";
   }
@@ -244,7 +260,10 @@ void handleTouch() {
                       touchY >= streamButton.y && touchY <= (streamButton.y + streamButton.h);
 
   if (insideButton) {
-    streamingEnabled = !streamingEnabled;
+    bool requestStart = !streamingEnabled;
+    streamingEnabled = requestStart;
+    Serial.println(requestStart ? "[STREAM] Start requested from touch UI." :
+                                      "[STREAM] Stop requested from touch UI.");
     if (streamingEnabled) {
       startStreaming();
     } else {
@@ -256,13 +275,17 @@ void handleTouch() {
 }
 
 void startStreaming() {
+  Serial.println("[STREAM] Start request received.");
   if (WiFi.status() != WL_CONNECTED) {
     streamStatusMessage = "WiFi required";
     streamingEnabled = false;
+    Serial.println("[STREAM] Cannot start - WiFi not connected.");
     return;
   }
 
   cleanupStream();
+
+  Serial.println("[STREAM] Creating stream source and audio output.");
 
   streamStatusMessage = "Connecting...";
   updateStatusText();
@@ -272,29 +295,80 @@ void startStreaming() {
     streamStatusMessage = "Stream failed";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("[STREAM] Failed to open stream URL.");
     return;
   }
 
-  audioOutput = new AudioOutputI2SNoDAC();
-  audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
-  audioOutput->SetOutputModeMono(true);
+  Serial.print("[STREAM] Connected to stream URL: ");
+  Serial.println(STREAM_URL);
+
+  bool useExternalI2S = I2S_SPEAKER_BCLK_PIN >= 0 && I2S_SPEAKER_LRCLK_PIN >= 0;
+  if (useExternalI2S) {
+    Serial.print("[STREAM] Configuring external I2S pins BCLK=");
+    Serial.print(I2S_SPEAKER_BCLK_PIN);
+    Serial.print(", LRCLK=");
+    Serial.print(I2S_SPEAKER_LRCLK_PIN);
+    Serial.print(", DATA=");
+    Serial.println(I2S_SPEAKER_DATA_PIN);
+    audioI2S = new AudioOutputI2S();
+  } else {
+    Serial.print("[STREAM] Using internal DAC on GPIO");
+    Serial.println(I2S_SPEAKER_DATA_PIN);
+    audioI2S = new AudioOutputI2SNoDAC();
+  }
+
+  if (!audioI2S) {
+    streamStatusMessage = "Audio init failed";
+    cleanupStream();
+    streamingEnabled = false;
+    Serial.println("[STREAM] Failed to allocate audio output.");
+    return;
+  }
+
+  audioOutput = audioI2S;
+
+  bool pinoutOk = false;
+  if (useExternalI2S) {
+    pinoutOk = audioI2S->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
+  } else {
+    if (I2S_SPEAKER_DATA_PIN < 0) {
+      Serial.println("[STREAM] Invalid DAC pin configuration. Set I2S_SPEAKER_DATA_PIN.");
+    } else {
+      pinoutOk = audioI2S->SetPinout(-1, -1, I2S_SPEAKER_DATA_PIN);
+    }
+  }
+
+  if (!pinoutOk) {
+    streamStatusMessage = "Audio pin error";
+    cleanupStream();
+    streamingEnabled = false;
+    Serial.println("[STREAM] Audio pin configuration failed.");
+    return;
+  }
+
+  audioI2S->SetOutputModeMono(true);
   audioOutput->SetGain(0.8f);
+  Serial.println("[STREAM] Audio output configured.");
 
   mp3 = new AudioGeneratorMP3();
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("[STREAM] MP3 decoder failed to begin.");
     return;
   }
 
   streamStatusMessage = "Streaming...";
+  Serial.println("[STREAM] Streaming started successfully.");
 }
 
 void stopStreaming() {
+  Serial.println("[STREAM] Stop request received.");
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
+      Serial.println("[STREAM] MP3 decoder stopped.");
     }
   }
   cleanupStream();
@@ -302,6 +376,7 @@ void stopStreaming() {
 }
 
 void cleanupStream() {
+  Serial.println("[STREAM] Cleaning up stream resources.");
   if (mp3) {
     delete mp3;
     mp3 = nullptr;
@@ -309,12 +384,14 @@ void cleanupStream() {
   if (audioOutput) {
     delete audioOutput;
     audioOutput = nullptr;
+    audioI2S = nullptr;
   }
   if (streamFile) {
     streamFile->close();
     delete streamFile;
     streamFile = nullptr;
   }
+  Serial.println("[STREAM] Cleanup complete.");
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {

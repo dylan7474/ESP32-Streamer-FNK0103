@@ -8,8 +8,11 @@
 // Audio streaming configuration
 #define STREAM_URL "http://192.168.50.4:8000/airband.mp3"
 
-// I2S pin configuration for the speaker connector
-// Set the pins that map to the speaker header. Use -1 for pins that are not used.
+// Audio output configuration
+// For the onboard speaker amplifier the ESP32's internal DAC (GPIO25) is used, so
+// leave the BCLK/LRCLK pins at -1 and only set the data pin.  If you wire an
+// external I2S amplifier provide all three pin numbers so the firmware switches
+// to true I2S mode.
 #define I2S_SPEAKER_BCLK_PIN -1
 #define I2S_SPEAKER_LRCLK_PIN -1
 #define I2S_SPEAKER_DATA_PIN 25
