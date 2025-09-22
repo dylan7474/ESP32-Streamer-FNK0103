@@ -6,7 +6,7 @@
 #define WIFI_PASSWORD "YOUR-PASSWORD"
 
 // Audio streaming configuration
-#define STREAM_URL "http://192.168.50.4:8000/airband.mp3"
+#define STREAM_URL "http://radio.dylanjones.org:8000/airbands"
 
 // I2S pin configuration for the speaker connector
 // Set the pins that map to the speaker header. Use -1 for pins that are not used.
