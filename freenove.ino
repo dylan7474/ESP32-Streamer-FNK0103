@@ -5,7 +5,6 @@
 #include <AudioFileSourceICYStream.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
-#include <AudioOutputI2SNoDAC.h>
 
 #include "config.h"
 
@@ -63,10 +62,13 @@ AudioGeneratorMP3 *mp3 = nullptr;
 AudioFileSourceICYStream *streamFile = nullptr;
 AudioOutput *audioOutput = nullptr;
 AudioOutputI2S *audioI2S = nullptr;
+bool amplifierEnabled = false;
+bool amplifierStateInitialised = false;
 
 void startStreaming();
 void stopStreaming();
 void cleanupStream();
+void setAmplifierState(bool enable);
 
 void drawLayout();
 void drawStreamButton();
@@ -84,6 +86,13 @@ void setup() {
   tft.begin();
   tft.setRotation(0);
   tft.fillScreen(COLOR_BACKGROUND);
+
+  if (AUDIO_AMP_ENABLE_PIN >= 0) {
+    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
+    setAmplifierState(false);
+    Serial.print("[SETUP] Audio amplifier control initialised on GPIO");
+    Serial.println(AUDIO_AMP_ENABLE_PIN);
+  }
 
   Serial.println("[SETUP] Display initialised. Preparing UI layout.");
 
@@ -302,7 +311,7 @@ void startStreaming() {
   Serial.print("[STREAM] Connected to stream URL: ");
   Serial.println(STREAM_URL);
 
-  bool useExternalI2S = I2S_SPEAKER_BCLK_PIN >= 0 && I2S_SPEAKER_LRCLK_PIN >= 0;
+  bool useExternalI2S = I2S_SPEAKER_BCLK_PIN >= 0 && I2S_SPEAKER_LRCLK_PIN >= 0 && I2S_SPEAKER_DATA_PIN >= 0;
   if (useExternalI2S) {
     Serial.print("[STREAM] Configuring external I2S pins BCLK=");
     Serial.print(I2S_SPEAKER_BCLK_PIN);
@@ -314,7 +323,7 @@ void startStreaming() {
   } else {
     Serial.print("[STREAM] Using internal DAC on GPIO");
     Serial.println(I2S_SPEAKER_DATA_PIN);
-    audioI2S = new AudioOutputI2SNoDAC();
+    audioI2S = new AudioOutputI2S(0, 1);
   }
 
   if (!audioI2S) {
@@ -347,7 +356,8 @@ void startStreaming() {
   }
 
   audioI2S->SetOutputModeMono(true);
-  audioOutput->SetGain(0.8f);
+  audioOutput->SetGain(1.0f);
+  setAmplifierState(true);
   Serial.println("[STREAM] Audio output configured.");
 
   mp3 = new AudioGeneratorMP3();
@@ -391,6 +401,7 @@ void cleanupStream() {
     delete streamFile;
     streamFile = nullptr;
   }
+  setAmplifierState(false);
   Serial.println("[STREAM] Cleanup complete.");
 }
 
@@ -451,4 +462,18 @@ bool readTouchPoint(int &screenX, int &screenY) {
   screenX = (int)mappedX;
   screenY = (int)mappedY;
   return true;
+}
+
+void setAmplifierState(bool enable) {
+  if (AUDIO_AMP_ENABLE_PIN < 0) {
+    return;
+  }
+  if (!amplifierStateInitialised || enable != amplifierEnabled) {
+    digitalWrite(AUDIO_AMP_ENABLE_PIN, enable ? LOW : HIGH);
+    if (!enable) {
+      delay(5);
+    }
+    amplifierEnabled = enable;
+    amplifierStateInitialised = true;
+  }
 }
