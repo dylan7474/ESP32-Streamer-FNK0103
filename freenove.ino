@@ -77,9 +77,13 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  Serial.println("\n[SETUP] Initialising TFT display and touch controller...");
+
   tft.begin();
   tft.setRotation(0);
   tft.fillScreen(COLOR_BACKGROUND);
+
+  Serial.println("[SETUP] Display initialised. Preparing UI layout.");
 
   int buttonWidth = tft.width() - 60;
   int buttonHeight = 100;
@@ -88,6 +92,7 @@ void setup() {
   streamButton = { buttonX, buttonY, buttonWidth, buttonHeight };
 
   drawLayout();
+  Serial.println("[SETUP] Layout drawn. Attempting WiFi connection.");
   connectToWifi();
   updateStatusText();
 }
@@ -99,6 +104,8 @@ void loop() {
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
     updateStatusText();
+    Serial.print("[WIFI] Connection restored. IP address: ");
+    Serial.println(wifiStatusMessage);
   }
 
   if (WiFi.status() != WL_CONNECTED && wifiConnected) {
@@ -110,9 +117,11 @@ void loop() {
       drawStreamButton();
     }
     updateStatusText();
+    Serial.println("[WIFI] Connection lost. Streaming disabled.");
   }
 
   if (WiFi.status() != WL_CONNECTED && millis() - lastWifiAttempt > WIFI_RETRY_INTERVAL_MS) {
+    Serial.println("[WIFI] Connection lost. Retrying WiFi connection...");
     connectToWifi();
   }
 
@@ -124,6 +133,7 @@ void loop() {
         streamingEnabled = false;
         drawStreamButton();
         updateStatusText();
+        Serial.println("[STREAM] Stream loop returned false. Stream stopped.");
       }
     } else {
       streamStatusMessage = "Stream stopped";
@@ -131,6 +141,7 @@ void loop() {
       streamingEnabled = false;
       drawStreamButton();
       updateStatusText();
+      Serial.println("[STREAM] Decoder reported not running. Stream stopped.");
     }
   }
 
@@ -200,7 +211,7 @@ void connectToWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  Serial.print("Connecting to WiFi network: ");
+  Serial.print("[WIFI] Connecting to WiFi network: ");
   Serial.println(WIFI_SSID);
 
   wifiConnected = false;
@@ -210,15 +221,17 @@ void connectToWifi() {
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
+    Serial.print('.');
   }
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Connected. IP address: ");
+    Serial.print("[WIFI] Connected. IP address: ");
     Serial.println(WiFi.localIP());
     wifiConnected = true;
     wifiStatusMessage = WiFi.localIP().toString();
   } else {
-    Serial.println("WiFi connection timed out.");
+    Serial.println("[WIFI] Connection timed out.");
     wifiConnected = false;
     wifiStatusMessage = "WiFi connection timed out";
   }
@@ -234,8 +247,14 @@ void handleTouch() {
     return;
   }
 
+  Serial.print("[TOUCH] Raw touch detected at: ");
+  Serial.print(touchX);
+  Serial.print(", ");
+  Serial.println(touchY);
+
   unsigned long now = millis();
   if (now - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    Serial.println("[TOUCH] Ignored due to debounce window.");
     return;
   }
   lastTouchTime = now;
@@ -244,6 +263,7 @@ void handleTouch() {
                       touchY >= streamButton.y && touchY <= (streamButton.y + streamButton.h);
 
   if (insideButton) {
+    Serial.println("[TOUCH] Stream button pressed.");
     streamingEnabled = !streamingEnabled;
     if (streamingEnabled) {
       startStreaming();
@@ -252,17 +272,23 @@ void handleTouch() {
     }
     drawStreamButton();
     updateStatusText();
+  } else {
+    Serial.println("[TOUCH] Touch outside control region.");
   }
 }
 
 void startStreaming() {
+  Serial.println("[STREAM] Start request received.");
   if (WiFi.status() != WL_CONNECTED) {
     streamStatusMessage = "WiFi required";
     streamingEnabled = false;
+    Serial.println("[STREAM] Cannot start - WiFi not connected.");
     return;
   }
 
   cleanupStream();
+
+  Serial.println("[STREAM] Creating stream source and audio output.");
 
   streamStatusMessage = "Connecting...";
   updateStatusText();
@@ -272,29 +298,38 @@ void startStreaming() {
     streamStatusMessage = "Stream failed";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("[STREAM] Failed to open stream URL.");
     return;
   }
+
+  Serial.print("[STREAM] Connected to stream URL: ");
+  Serial.println(STREAM_URL);
 
   audioOutput = new AudioOutputI2SNoDAC();
   audioOutput->SetPinout(I2S_SPEAKER_BCLK_PIN, I2S_SPEAKER_LRCLK_PIN, I2S_SPEAKER_DATA_PIN);
   audioOutput->SetOutputModeMono(true);
   audioOutput->SetGain(0.8f);
+  Serial.println("[STREAM] Audio output configured.");
 
   mp3 = new AudioGeneratorMP3();
   if (!mp3->begin(streamFile, audioOutput)) {
     streamStatusMessage = "Decoder error";
     cleanupStream();
     streamingEnabled = false;
+    Serial.println("[STREAM] MP3 decoder failed to begin.");
     return;
   }
 
   streamStatusMessage = "Streaming...";
+  Serial.println("[STREAM] Streaming started successfully.");
 }
 
 void stopStreaming() {
+  Serial.println("[STREAM] Stop request received.");
   if (mp3) {
     if (mp3->isRunning()) {
       mp3->stop();
+      Serial.println("[STREAM] MP3 decoder stopped.");
     }
   }
   cleanupStream();
@@ -302,6 +337,7 @@ void stopStreaming() {
 }
 
 void cleanupStream() {
+  Serial.println("[STREAM] Cleaning up stream resources.");
   if (mp3) {
     delete mp3;
     mp3 = nullptr;
@@ -315,6 +351,7 @@ void cleanupStream() {
     delete streamFile;
     streamFile = nullptr;
   }
+  Serial.println("[STREAM] Cleanup complete.");
 }
 
 bool readTouchPoint(int &screenX, int &screenY) {
