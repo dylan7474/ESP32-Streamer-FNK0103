@@ -6,7 +6,7 @@
 #define WIFI_PASSWORD "YOUR-PASSWORD"
 
 // Audio streaming configuration
-#define STREAM_URL "http://192.168.50.4:8000/airband.mp3"
+#define STREAM_URL "http://192.168.50.3:8000/airbands"
 
 // Audio output configuration
 // The onboard speaker amplifier is controlled by an enable pin and receives audio
@@ -17,3 +17,4 @@
 #define I2S_SPEAKER_DATA_PIN 25
 
 #endif // CONFIG_H
+
